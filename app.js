@@ -91,7 +91,8 @@ function patternFeatures(days,i){
 /* Historical precursor research: 15-minute candles, chronological train/holdout,
    actual +3% / 60-minute events, non-event controls, and nearest-pattern comparison.
    Results are descriptive, never probabilities of future returns. */
-const HIST_INTERVAL=15,HIST_PAGES=7,HORIZON=4,TARGET_GAIN=.03;
+const HIST_INTERVAL=15,HIST_PAGES=5,HIST_TARGETS=36,HORIZON=4,TARGET_GAIN=.03;
+const MIN_DAILY_KRW=100000000;
 const SCAN_MAX_24H_GAIN=8, SCAN_MAX_STALE_MS=45*60000;
 const MIN_NEIGHBORS=15, MIN_VALIDATION_SIGNALS=8;
 const featureNames=['1시간 수익률','3시간 수익률','6시간 수익률','24시간 수익률','1시간 거래대금 배수','3시간 거래대금 배수','6시간 변동폭','24시간 고점 근접도','종가 위치'];
@@ -127,7 +128,67 @@ function outcome(c,i){
  if(finish-start!==HORIZON*HIST_INTERVAL*60000)return null;
  return Math.max(...c.slice(i+1,i+HORIZON+1).map(x=>x.high_price))>=c[i].trade_price*(1+TARGET_GAIN);
 }
+
+// Cached history avoids downloading hundreds of candles again on each scan.
+// IndexedDB is optional: private browsing / blocked storage falls back to in-memory cache.
+const historyMemory=new Map();
+let historyDBPromise;
+function historyDB(){
+ if(!('indexedDB' in window))return Promise.resolve(null);
+ if(!historyDBPromise)historyDBPromise=new Promise(resolve=>{
+  try{
+   const req=indexedDB.open('usl-history-v1',1);
+   req.onupgradeneeded=()=>req.result.createObjectStore('candles');
+   req.onsuccess=()=>resolve(req.result);
+   req.onerror=()=>resolve(null);
+   req.onblocked=()=>resolve(null);
+  }catch(e){resolve(null)}
+ });
+ return historyDBPromise;
+}
+async function cachedHistory(market){
+ const mem=historyMemory.get(market);
+ if(mem&&Date.now()-mem.at<15*60000)return mem.candles;
+ const db=await historyDB();
+ if(!db)return null;
+ return new Promise(resolve=>{
+  try{
+   const tx=db.transaction('candles','readonly');
+   const req=tx.objectStore('candles').get(market);
+   req.onsuccess=()=>{
+    const entry=req.result;
+    if(entry&&Date.now()-entry.at<15*60000){
+     historyMemory.set(market,entry);resolve(entry.candles)
+    }else resolve(null);
+   };
+   req.onerror=()=>resolve(null);
+  }catch(e){resolve(null)}
+ });
+}
+async function saveHistory(market,candles){
+ const entry={at:Date.now(),candles};
+ historyMemory.set(market,entry);
+ const db=await historyDB();
+ if(!db)return;
+ try{const tx=db.transaction('candles','readwrite');tx.objectStore('candles').put(entry,market)}catch(e){}
+}
+function selectScanTargets(all){
+ const eligible=all.filter(t=>t.market.startsWith('KRW-')&&!STABLE_SYMBOLS.has(t.market.slice(4))&&
+  Number.isFinite(t.acc_trade_price_24h)&&t.acc_trade_price_24h>=MIN_DAILY_KRW&&
+  Number.isFinite(t.signed_change_rate)&&t.signed_change_rate*100<=SCAN_MAX_24H_GAIN&&
+  t.signed_change_rate*100>=-12);
+ // Separate high-liquidity and emerging-liquidity groups: do not scan only the top-volume coins.
+ const sorted=[...eligible].sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h);
+ const high=sorted.slice(0,18);
+ const emerging=sorted.slice(18).filter(t=>t.acc_trade_price_24h>=MIN_DAILY_KRW)
+  .sort((a,b)=>Math.abs(a.signed_change_rate*100-.5)-Math.abs(b.signed_change_rate*100-.5)||b.acc_trade_price_24h-a.acc_trade_price_24h)
+  .slice(0,HIST_TARGETS-high.length);
+ return {targets:[...high,...emerging],eligible:eligible.length,all:all.filter(t=>t.market.startsWith('KRW-')).length};
+}
+
 async function fetchHistory(market,progress){
+ const cached=await cachedHistory(market);
+ if(cached){progress(0,0);return cached}
  const seen=new Map();let to='';
  for(let page=0;page<HIST_PAGES;page++){
   progress(page+1,HIST_PAGES);
@@ -145,7 +206,9 @@ async function fetchHistory(market,progress){
   await pause(125);
  }
  const now=Math.floor(Date.now()/(HIST_INTERVAL*60000))*HIST_INTERVAL*60000;
- return [...seen.values()].filter(x=>Date.parse(x.candle_date_time_utc+'Z')<now).sort((a,b)=>a.candle_date_time_utc.localeCompare(b.candle_date_time_utc));
+ const candles=[...seen.values()].filter(x=>Date.parse(x.candle_date_time_utc+'Z')<now).sort((a,b)=>a.candle_date_time_utc.localeCompare(b.candle_date_time_utc));
+ if(candles.length>=200)await saveHistory(market,candles);
+ return candles;
 }
 function historicalSamples(c){
  const train=[],test=[];const split=Math.floor(c.length*.7);
@@ -204,24 +267,25 @@ $('scanPatterns').onclick=async()=>{
  if(!tickers.length){$('scanProgress').textContent='먼저 시세 연결을 기다려 주세요.';return}
  scanBusy=true;
  const btn=$('scanPatterns'),progress=$('scanProgress'),out=$('patternCandidates');
- btn.disabled=true;out.innerHTML='<p>원화마켓 전체 종목의 과거 분봉을 수집합니다. 종목 수에 따라 수 분에서 수십 분이 걸릴 수 있으며, 화면을 닫으면 분석이 중단됩니다.</p>';
+ btn.disabled=true;out.innerHTML='<p>전체 원화마켓 시세를 확인하고 거래대금·상승률 기준으로 최대 36종을 선별해 정밀 분석합니다. 최근 수집한 분봉은 15분 동안 재사용합니다.</p>';
  let failed=0,processed=0;
  try{
   // Every listed KRW coin is examined, not only the highest-volume names.
-  const targets=[...tickers].filter(t=>t.market.startsWith('KRW-')&&!STABLE_SYMBOLS.has(t.market.slice(4)))
-   .sort((a,b)=>a.market.localeCompare(b.market));
+  const screening=selectScanTargets(tickers);
+  const targets=screening.targets;
+  if(!targets.length){out.textContent='현재 1차 거래대금·상승률 기준을 만족하는 종목이 없습니다.';progress.textContent='선별 종목 0개';$('candidates').textContent='0';return}
   const records=[],train=[],test=[];
   for(const t of targets){
-   progress.textContent='과거 자료 수집 '+(++processed)+'/'+targets.length+' · '+t.market;
+   progress.textContent='전체 '+screening.all+'종 시세 확인 → '+screening.eligible+'종 1차 통과 → 정밀 '+(++processed)+'/'+targets.length+' · '+t.market;
    try{
-    const history=await fetchHistory(t.market,(p,max)=>{progress.textContent='수집 '+processed+'/'+targets.length+' · '+t.market+' · '+p+'/'+max+'페이지'});
+    const history=await fetchHistory(t.market,(p,max)=>{progress.textContent=p===0?'캐시 사용 '+processed+'/'+targets.length+' · '+t.market:'분봉 수집 '+processed+'/'+targets.length+' · '+t.market+' · '+p+'/'+max+'페이지'});
     if(history.length<200)throw Error('과거 봉 부족');
     const samples=historicalSamples(history);
     records.push({t,history});
     train.push(...samples.train);test.push(...samples.test);
    }catch(e){failed++;console.warn('Historical data:',t.market,e)}
    // Yield for mobile rendering and avoid hammering the public API.
-   await pause(240);
+   await pause(180);
   }
   if(train.length<100||test.length<30){
    out.innerHTML='<p>과거 데이터가 충분하지 않아 후보를 표시하지 않습니다. 수집 '+records.length+'종, 학습 '+train.length+'건, 검증 '+test.length+'건. API 조회 상태를 확인하세요.</p>';
@@ -247,7 +311,7 @@ $('scanPatterns').onclick=async()=>{
   const percent=x=>(x*100).toFixed(1)+'%';
   const validationText='학습 '+chronologicalTrain.length+'개 구간 / 시간순 검증 '+chronologicalTest.length+'개 구간 (초기 전조 조건 학습 '+validation.trainEligible+'개 · 검증 '+validation.total+'개) · 해당 구간 기본 급등률 '+percent(validation.baseline)+
    ' · 검증 신호 '+validation.selected+'건, 실제 성공 '+validation.hits+'건, 적중률 '+(validation.selected?percent(validation.precision):'표본 없음');
-  const summary='<article class="pattern-card"><b>과거 실제 급등과 비급등 구간 비교</b><p>원화마켓 전체 '+targets.length+'종 중 '+records.length+'종 분석 · 15분봉 종목당 최대 '+(HIST_PAGES*200)+'개 · 60분 내 +3%를 급등 사건으로 정의</p><p>'+esc(validationText)+'</p><p>전체 종목에 공통 시간 경계(앞 70%/뒤 30%)를 적용하고 시간 경계의 겹치는 사건을 제외합니다. 이미 급등한 종목(24시간 +8% 초과, 3시간 +3% 초과 등)은 전조 후보에서 제외합니다. 검증 성과가 충분하지 않으면 급등 후보를 표시하지 않습니다. 시간대가 겹치는 표본과 종목 간 상관이 있으므로 이 수치는 미래 상승 확률이 아닙니다.</p></article>';
+  const summary='<article class="pattern-card"><b>과거 실제 급등과 비급등 구간 비교</b><p>원화마켓 전체 '+screening.all+'종 시세 확인 · 1차 선별 '+screening.eligible+'종 · 정밀 분석 '+targets.length+'종 중 '+records.length+'종 성공 · 15분봉 종목당 최대 '+(HIST_PAGES*200)+'개 · 60분 내 +3%를 급등 사건으로 정의</p><p>'+esc(validationText)+'</p><p>전체 종목에 공통 시간 경계(앞 70%/뒤 30%)를 적용하고 시간 경계의 겹치는 사건을 제외합니다. 이미 급등한 종목(24시간 +8% 초과, 3시간 +3% 초과 등)은 전조 후보에서 제외합니다. 검증 성과가 충분하지 않으면 급등 후보를 표시하지 않습니다. 시간대가 겹치는 표본과 종목 간 상관이 있으므로 이 수치는 미래 상승 확률이 아닙니다.</p></article>';
   const renderAssessment=c=>{
    const label=c.category==='candidate'?'초기 급등 전조 후보 (제한적 검증)':c.category==='watch'?'관찰 전용 · 검증 부족':'전조 제외 · 조건 미충족';
    const details=c.f.map((x,i)=>featureNames[i]+': '+(i===7||i===8?(x*100).toFixed(1)+'%':i===4||i===5?x.toFixed(2)+'배':x.toFixed(2)+'%'));
@@ -260,7 +324,7 @@ $('scanPatterns').onclick=async()=>{
   const excluded=assessments.filter(x=>x.category!=='candidate');
   out.innerHTML=summary+(candidates.length?candidates.map(renderAssessment).join(''):'<article class="pattern-card"><b>현재 검증 기준을 통과한 초기 급등 전조 후보가 없습니다.</b><p>이미 급등한 종목과 검증이 부족한 종목은 후보 목록에서 제외했습니다. 조건을 임의로 낮춰 후보를 만들지 않습니다.</p></article>')+
    (excluded.length?'<details><summary>관찰·제외 종목 '+excluded.length+'종 보기 (기본 숨김)</summary>'+excluded.map(renderAssessment).join('')+'</details>':'');
-  progress.textContent='전체 '+targets.length+'종 검사 완료 · '+records.length+'종 분석 성공 · '+candidates.length+'종 후보 · '+failed+'종 자료 부족/조회 실패 · '+new Date().toLocaleTimeString('ko-KR');
+  progress.textContent='전체 '+screening.all+'종 시세 확인 · 정밀 '+records.length+'/'+targets.length+'종 완료 · '+candidates.length+'종 후보 · '+failed+'종 자료 부족/조회 실패 · '+new Date().toLocaleTimeString('ko-KR');
  }catch(e){out.textContent='분석 오류: '+e.message;progress.textContent='분석 실패'}
  finally{btn.disabled=false;scanBusy=false}
 };
