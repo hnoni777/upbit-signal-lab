@@ -91,10 +91,10 @@ function patternFeatures(days,i){
 /* Historical precursor research: 15-minute candles, chronological train/holdout,
    actual +3% / 60-minute events, non-event controls, and nearest-pattern comparison.
    Results are descriptive, never probabilities of future returns. */
-const HIST_INTERVAL=15,HIST_PAGES=5,HIST_TARGETS=36,HORIZON=4,TARGET_GAIN=.03;
+const HIST_INTERVAL=15,HIST_PAGES=7,HIST_TARGETS=36,HORIZON=4,TARGET_GAIN=.03;
 const MIN_DAILY_KRW=100000000;
 const SCAN_MAX_24H_GAIN=8, SCAN_MAX_STALE_MS=45*60000;
-const MIN_NEIGHBORS=15, MIN_VALIDATION_SIGNALS=8;
+const MIN_NEIGHBORS=25, MIN_VALIDATION_SIGNALS=8;
 const featureNames=['1시간 수익률','3시간 수익률','6시간 수익률','24시간 수익률','1시간 거래대금 배수','3시간 거래대금 배수','6시간 변동폭','24시간 고점 근접도','종가 위치'];
 function pctReturn(a,b){return 100*(a/Math.max(b,1e-12)-1)}
 function extractFeatures(c,i){
@@ -119,8 +119,10 @@ function extractFeatures(c,i){
 }
 const scales=[2,4,7,15,2,2,5,.06,.5];
 function distance(a,b){return a.reduce((s,v,j)=>s+Math.min(16,Math.pow((v-b[j])/scales[j],2)),0)/a.length}
-function neighbors(v,samples,k=MIN_NEIGHBORS){
- return samples.map(x=>({d:distance(v,x.f),event:x.event})).sort((a,b)=>a.d-b.d).slice(0,k);
+function neighbors(v,samples,k=MIN_NEIGHBORS,excludeMarket=''){
+ // Exclude the same market where possible, to avoid merely memorizing its own regime.
+ const pool=excludeMarket?samples.filter(x=>x.market!==excludeMarket):samples;
+ return pool.map(x=>({d:distance(v,x.f),event:x.event})).sort((a,b)=>a.d-b.d).slice(0,k);
 }
 function outcome(c,i){
  if(i+HORIZON>=c.length)return null;
@@ -148,7 +150,8 @@ function historyDB(){
 }
 async function cachedHistory(market){
  const mem=historyMemory.get(market);
- if(mem&&Date.now()-mem.at<15*60000)return mem.candles;
+ // A completed 15-minute candle must be fresh enough for the present scan.
+ if(mem&&Date.now()-mem.at<5*60000)return mem.candles;
  const db=await historyDB();
  if(!db)return null;
  return new Promise(resolve=>{
@@ -157,7 +160,7 @@ async function cachedHistory(market){
    const req=tx.objectStore('candles').get(market);
    req.onsuccess=()=>{
     const entry=req.result;
-    if(entry&&Date.now()-entry.at<15*60000){
+    if(entry&&Date.now()-entry.at<5*60000){
      historyMemory.set(market,entry);resolve(entry.candles)
     }else resolve(null);
    };
@@ -237,7 +240,7 @@ function evaluateModel(train,test){
  // Fixed before holdout evaluation. Never tune against test labels.
  const cutoff=Math.max(.20,trainBase*1.35);
  for(const x of eligible){
-  const n=neighbors(x.f,training,MIN_NEIGHBORS);
+  const n=neighbors(x.f,training,MIN_NEIGHBORS,x.market);
   if(n.length<MIN_NEIGHBORS)continue;
   const rate=n.filter(y=>y.event).length/n.length;
   if(rate>=cutoff){selected++;if(x.event)hits++}
@@ -252,7 +255,7 @@ function candidateAssessment(t,history,train,validation){
  const fresh=Date.now()-lastTs<=SCAN_MAX_STALE_MS;
  const notAlreadyUp=t.signed_change_rate*100<=SCAN_MAX_24H_GAIN;
  const pre=earlyStage(f)&&fresh&&notAlreadyUp;
- const n=neighbors(f,train.filter(x=>earlyStage(x.f)),MIN_NEIGHBORS);
+ const n=neighbors(f,train.filter(x=>earlyStage(x.f)),MIN_NEIGHBORS,t.market);
  if(n.length<MIN_NEIGHBORS)return {market:t.market,name:t.meta?.korean_name||t.market,price:t.trade_price,change:t.signed_change_rate*100,f,rate:0,hits:0,neighbors:n.length,category:'risk',reason:'급등 이전 조건에 맞는 과거 비교 표본 부족',date:history.at(-1).candle_date_time_kst};
  const hits=n.filter(x=>x.event).length,rate=hits/n.length;
  const validated=validation.selected>=MIN_VALIDATION_SIGNALS&&validation.hits>=3&&validation.precision>validation.baseline*1.2&&validation.precision>validation.trainBase;
@@ -322,8 +325,10 @@ $('scanPatterns').onclick=async()=>{
     '<button data-add-watch="'+esc(c.market)+'">☆ 관심 종목 등록</button></article>';
   };
   const excluded=assessments.filter(x=>x.category!=='candidate');
-  out.innerHTML=summary+(candidates.length?candidates.map(renderAssessment).join(''):'<article class="pattern-card"><b>현재 검증 기준을 통과한 초기 급등 전조 후보가 없습니다.</b><p>이미 급등한 종목과 검증이 부족한 종목은 후보 목록에서 제외했습니다. 조건을 임의로 낮춰 후보를 만들지 않습니다.</p></article>')+
-   (excluded.length?'<details><summary>관찰·제외 종목 '+excluded.length+'종 보기 (기본 숨김)</summary>'+excluded.map(renderAssessment).join('')+'</details>':'');
+  const observed=assessments.filter(x=>x.category==='watch'&&x.rate>=validation.cutoff).sort((a,b)=>b.rate-a.rate).slice(0,5);
+  out.innerHTML=summary+(candidates.length?candidates.map(renderAssessment).join(''):'<article class="pattern-card"><b>현재 검증 기준을 통과한 초기 급등 전조 후보가 없습니다.</b><p>검증에 실패한 신호를 성공한 것처럼 표시하지 않습니다. 아래 관찰 종목은 예측이 검증되지 않은 참고 자료입니다.</p></article>')+
+   (observed.length?'<section><h3>검증 미통과 · 초기 움직임 관찰 (매수 신호 아님)</h3>'+observed.map(renderAssessment).join('')+'</section>':'')+
+   (excluded.length?'<details><summary>관찰·제외 종목 전체 '+excluded.length+'종 보기</summary>'+excluded.map(renderAssessment).join('')+'</details>':'');
   progress.textContent='전체 '+screening.all+'종 시세 확인 · 정밀 '+records.length+'/'+targets.length+'종 완료 · '+candidates.length+'종 후보 · '+failed+'종 자료 부족/조회 실패 · '+new Date().toLocaleTimeString('ko-KR');
  }catch(e){out.textContent='분석 오류: '+e.message;progress.textContent='분석 실패'}
  finally{btn.disabled=false;scanBusy=false}
