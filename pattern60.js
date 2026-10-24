@@ -1,10 +1,8 @@
 'use strict';
-/* v28: one-year historical spike precursor similarity, distinct from predicted probability.
-   The 365-day daily screen finds events; 15m candles ending BEFORE the event day form
-   exemplars. Current 15m candles are compared without future data. */
+/* v30: one-year spike event research, intraday onset detection and strictly pre-onset features. */
 (()=>{
  const DAYS=365,DAILY_LIMIT=100,EVENT_LIMIT=60,CURRENT_LIMIT=45;
- const CACHE_KEY='usl-365d-event-v2';
+ const CACHE_KEY='usl-365d-intraday-onset-v3';
  const $=id=>document.getElementById(id);
  const escape=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -58,6 +56,46 @@
   const now=Math.floor(Date.now()/900000)*900000;
   return ascending(data.filter(x=>Date.parse(x.candle_date_time_utc+'Z')<now));
  }
+ async function eventCandles(market,start){
+  const end=new Date(Date.parse(start+'Z')+86400000).toISOString().slice(0,19)+'Z';
+  const seen=new Map();let to=end;
+  // 2 x 200 fifteen-minute candles cover the event day plus 24h of precursors.
+  for(let page=0;page<2;page++){
+   const batch=await json('/candles/minutes/15?market='+encodeURIComponent(market)+'&count=200&to='+encodeURIComponent(to));
+   if(!batch.length)break;
+   for(const c of batch)seen.set(c.candle_date_time_utc,c);
+   const oldest=batch.at(-1).candle_date_time_utc;
+   if(batch.length<200||oldest+'Z'===to)break;
+   to=oldest+'Z';
+   await sleep(130);
+  }
+  return ascending([...seen.values()]);
+ }
+ function onsetSamples(e,candles){
+  const dayStart=Date.parse(e.date+'Z'),dayEnd=dayStart+86400000;
+  const day=candles.filter(c=>{const t=Date.parse(c.candle_date_time_utc+'Z');return t>=dayStart&&t<dayEnd});
+  if(!day.length)return [];
+  const opening=Number(day[0].opening_price);
+  // First 15-minute bar whose HIGH crosses +3% from the day's opening.
+  // This is an operational onset proxy, not proof of the precise first trade.
+  const onset=day.find(c=>Number(c.high_price)>=opening*1.03);
+  if(!onset)return [];
+  const onsetTime=Date.parse(onset.candle_date_time_utc+'Z');
+  const startIndex=candles.findIndex(c=>c.candle_date_time_utc===onset.candle_date_time_utc);
+  const stages=[{hours:6,bars:24},{hours:3,bars:12},{hours:1,bars:4}];
+  const result=[];
+  for(const stage of stages){
+   // Last input candle must finish before the onset candle opens.
+   const endIndex=startIndex-stage.bars-1;
+   if(endIndex<96)continue;
+   const f=vector(candles.slice(0,endIndex+1));
+   if(!f)continue;
+   const last=Date.parse(candles[endIndex].candle_date_time_utc+'Z');
+   if(onsetTime-last!==(stage.bars+1)*900000)continue;
+   result.push({...e,f,stageHours:stage.hours,onsetTime:new Date(onsetTime).toISOString(),onsetRule:'당일 시가 대비 고가 +3% 첫 15분봉'});
+  }
+  return result;
+ }
  async function yearDaily(market){
   const all=new Map();let to='';
   for(let page=0;page<3;page++){
@@ -101,26 +139,24 @@
    picked.push(e);perCoin.set(e.market,n+1);
    if(picked.length>=EVENT_LIMIT)break;
   }
-  const examples=[];
+  const examples=[];let detectedOnsets=0;
   for(let i=0;i<picked.length;i++){
    const e=picked[i];
    progress('급등 직전 15분봉 추출 '+(i+1)+'/'+picked.length+' · '+e.market);
    try{
-    // The event day's opening is 00:00 UTC for Upbit daily candles (09:00 KST).
-    // The cursor is exclusive: no price information from the spike day enters features.
-    const history=await priorCandles(e.market,e.date+'Z');
-    const f=vector(history);
-    if(f)examples.push({...e,f});
+    const history=await eventCandles(e.market,e.date);
+    const samples=onsetSamples(e,history);
+    if(samples.length){detectedOnsets++;examples.push(...samples)}
    }catch(err){errors.push(e.market+' 과거 분봉: '+err.message)}
    if(i%4===0)await sleep(140);
   }
-  return {examples,events:events.length,scanned:selected.length,errors:errors.length,at:Date.now()};
+  return {examples,detectedOnsets,events:events.length,scanned:selected.length,errors:errors.length,at:Date.now()};
  }
  function cached(){
   try{const v=JSON.parse(localStorage.getItem(CACHE_KEY)||'null');return v&&Array.isArray(v.examples)&&v.examples.length?v:null}catch(e){return null}
  }
  function save(v){try{localStorage.setItem(CACHE_KEY,JSON.stringify(v))}catch(e){}}
- const note='유사도는 과거 급등 직전 모양의 거리일 뿐 미래 상승 확률이나 매수 신호가 아닙니다. 과거 사건은 일봉 고가가 시가 대비 +10% 이상인 날로 정의하며, 그날 시작 전까지의 15분봉만 비교합니다.';
+ const note='급등 사례는 일봉 시가 대비 고가 +10% 이상인 날입니다. 그날 시가 대비 고가가 처음 +3%에 도달한 15분봉을 급등 시작의 대리 지표로 사용하며, 해당 봉 및 이후 데이터는 특징 계산에서 제외합니다. 1·3·6시간 전 패턴을 각각 비교합니다. 유사도는 상승 확률이 아닙니다.';
  async function scan(){
   const btn=$('scanPatterns'),rebuild=$('rebuildPatterns'),out=$('patternCandidates'),progress=$('scanProgress');
   if(btn.disabled||rebuild.disabled)return;
@@ -135,7 +171,7 @@
    else progress.textContent='저장된 과거 패턴 '+db.examples.length+'건 재사용 · '+new Date(db.at).toLocaleDateString('ko-KR')+' 생성';
    if(!db.examples.length){
     progress.textContent='급등 전조 학습 표본 없음';
-    out.innerHTML='<p>급등 발생일 직전의 유효한 15분봉을 수집하지 못했습니다. API 접근이나 데이터 연속성을 확인해야 합니다. 임의의 후보는 표시하지 않습니다.</p>';
+    out.innerHTML='<p>급등 시작 1·3·6시간 전의 유효한 15분봉을 수집하지 못했습니다. API 접근이나 데이터 연속성을 확인해야 합니다. 임의의 후보는 표시하지 않습니다.</p>';
     $('candidates').textContent='0';return;
    }
    const current=eligible.filter(t=>t.signed_change_rate*100<=8&&t.signed_change_rate*100>=-12).slice(0,CURRENT_LIMIT);
@@ -155,9 +191,9 @@
    matches.sort((a,b)=>a.nearest.d-b.nearest.d);
    const top=matches.slice(0,10);
    $('candidates').textContent=String(top.length);
-   progress.textContent='저장된 과거 DB '+db.examples.length+'건 ('+new Date(db.at).toLocaleDateString('ko-KR')+') · 현재 비교 '+matches.length+'종 · 상위 '+top.length+'종';
-   out.innerHTML='<article class="pattern-card"><b>최근 365일 실제 급등 직전 패턴 유사도 TOP 10</b><p>'+escape(progress.textContent)+'</p><p>'+escape(note)+'</p><p>조사 대상은 거래대금 상위 최대 '+DAILY_LIMIT+'종, 현재 비교는 최대 '+CURRENT_LIMIT+'종입니다. 원화마켓 전체를 분석한 결과는 아닙니다. 과거 패턴 DB는 삭제하거나 직접 재수집하지 않는 한 계속 재사용합니다.</p></article>'+
-    (top.length?top.map((m,i)=>'<article class="pattern-card"><div class="pattern-head"><b>'+(i+1)+'. '+escape(m.t.meta?.korean_name||m.t.market)+' <small>'+escape(m.t.market)+'</small></b><span>형태 유사도 '+m.similarity+'/100</span></div><p>현재 '+Number(m.t.trade_price).toLocaleString('ko-KR',{maximumFractionDigits:8})+'원 · 24시간 '+(m.t.signed_change_rate*100).toFixed(2)+'%</p><p>가장 유사한 과거 사례: '+escape(m.nearest.e.name)+' ('+escape(m.nearest.e.market)+') · '+escape(m.nearest.e.date.slice(0,10))+' · 당시 일봉 시가 대비 고가 +'+m.nearest.e.gain.toFixed(1)+'%</p><p>현재 1시간 '+m.f[0].toFixed(2)+'% · 3시간 '+m.f[1].toFixed(2)+'% · 1시간 거래대금 '+m.f[4].toFixed(2)+'배 · 3시간 거래대금 '+m.f[5].toFixed(2)+'배</p><p>이 사례와 비슷하다는 것은 향후 같은 상승폭을 뜻하지 않습니다.</p><button data-add-watch="'+escape(m.t.market)+'">☆ 관심 종목 등록</button></article>').join(''):'<p>현재 비교 가능한 연속 15분봉이 없습니다.</p>');
+   progress.textContent='저장된 과거 단계별 패턴 '+db.examples.length+'건 ('+new Date(db.at).toLocaleDateString('ko-KR')+') · 현재 비교 '+matches.length+'종 · 상위 '+top.length+'종';
+   out.innerHTML='<article class="pattern-card"><b>최근 365일 실제 급등 시작 1·3·6시간 전 패턴 유사도 TOP 10</b><p>'+escape(progress.textContent)+'</p><p>'+escape(note)+'</p><p>조사 대상은 거래대금 상위 최대 '+DAILY_LIMIT+'종, 현재 비교는 최대 '+CURRENT_LIMIT+'종입니다. 원화마켓 전체를 분석한 결과는 아닙니다. 과거 패턴 DB는 삭제하거나 직접 재수집하지 않는 한 계속 재사용합니다.</p></article>'+
+    (top.length?top.map((m,i)=>'<article class="pattern-card"><div class="pattern-head"><b>'+(i+1)+'. '+escape(m.t.meta?.korean_name||m.t.market)+' <small>'+escape(m.t.market)+'</small></b><span>형태 유사도 '+m.similarity+'/100</span></div><p>현재 '+Number(m.t.trade_price).toLocaleString('ko-KR',{maximumFractionDigits:8})+'원 · 24시간 '+(m.t.signed_change_rate*100).toFixed(2)+'%</p><p>가장 유사한 과거 사례: '+escape(m.nearest.e.name)+' ('+escape(m.nearest.e.market)+') · '+escape(m.nearest.e.date.slice(0,10))+' · 급등 시작 '+m.nearest.e.stageHours+'시간 전 · 시작 '+escape(m.nearest.e.onsetTime.slice(0,16).replace('T',' '))+' UTC · 당시 일봉 고가 +'+m.nearest.e.gain.toFixed(1)+'%</p><p>현재 1시간 '+m.f[0].toFixed(2)+'% · 3시간 '+m.f[1].toFixed(2)+'% · 1시간 거래대금 '+m.f[4].toFixed(2)+'배 · 3시간 거래대금 '+m.f[5].toFixed(2)+'배</p><p>이 사례와 비슷하다는 것은 향후 같은 상승폭을 뜻하지 않습니다.</p><button data-add-watch="'+escape(m.t.market)+'">☆ 관심 종목 등록</button></article>').join(''):'<p>현재 비교 가능한 연속 15분봉이 없습니다.</p>');
   }catch(e){progress.textContent='유사도 분석 실패';out.textContent='분석 실패: '+e.message}
   finally{btn.disabled=false;rebuild.disabled=false}
  }
