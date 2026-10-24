@@ -117,21 +117,22 @@
   return {examples,events:events.length,scanned:selected.length,errors:errors.length,at:Date.now()};
  }
  function cached(){
-  try{const v=JSON.parse(localStorage.getItem(CACHE_KEY)||'null');return v&&Date.now()-v.at<86400000?v:null}catch(e){return null}
+  try{const v=JSON.parse(localStorage.getItem(CACHE_KEY)||'null');return v&&Array.isArray(v.examples)&&v.examples.length?v:null}catch(e){return null}
  }
  function save(v){try{localStorage.setItem(CACHE_KEY,JSON.stringify(v))}catch(e){}}
  const note='유사도는 과거 급등 직전 모양의 거리일 뿐 미래 상승 확률이나 매수 신호가 아닙니다. 과거 사건은 일봉 고가가 시가 대비 +10% 이상인 날로 정의하며, 그날 시작 전까지의 15분봉만 비교합니다.';
  async function scan(){
-  const btn=$('scanPatterns'),out=$('patternCandidates'),progress=$('scanProgress');
-  if(btn.disabled)return;
+  const btn=$('scanPatterns'),rebuild=$('rebuildPatterns'),out=$('patternCandidates'),progress=$('scanProgress');
+  if(btn.disabled||rebuild.disabled)return;
   if(!tickers.length){progress.textContent='시세 연결 후 다시 실행해 주세요.';return}
-  btn.disabled=true;out.innerHTML='<p>최근 365일 급등 사례를 조사하고, 급등 발생일 이전 패턴을 추출합니다. 첫 실행에는 시간이 걸릴 수 있습니다.</p>';
+  btn.disabled=true;rebuild.disabled=true;out.innerHTML='<p>저장된 과거 패턴이 있으면 그대로 사용하고 현재 코인만 새로 비교합니다. 저장된 패턴이 없다면 최초 1회 수집합니다.</p>';
   try{
    const eligible=tickers.filter(t=>t.market.startsWith('KRW-')&&!STABLE_SYMBOLS.has(t.market.slice(4))&&Number(t.acc_trade_price_24h)>=100000000)
     .sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h);
    const selected=eligible.slice(0,DAILY_LIMIT);
    let db=cached();
-   if(!db){db=await buildExamples(selected,s=>progress.textContent=s);save(db)}
+   if(!db){db=await buildExamples(selected,s=>progress.textContent=s);if(db.examples.length)save(db)}
+   else progress.textContent='저장된 과거 패턴 '+db.examples.length+'건 재사용 · '+new Date(db.at).toLocaleDateString('ko-KR')+' 생성';
    if(!db.examples.length){
     progress.textContent='급등 전조 학습 표본 없음';
     out.innerHTML='<p>급등 발생일 직전의 유효한 15분봉을 수집하지 못했습니다. API 접근이나 데이터 연속성을 확인해야 합니다. 임의의 후보는 표시하지 않습니다.</p>';
@@ -154,11 +155,16 @@
    matches.sort((a,b)=>a.nearest.d-b.nearest.d);
    const top=matches.slice(0,10);
    $('candidates').textContent=String(top.length);
-   progress.textContent='365일 조사 '+db.scanned+'종 · 급등 사건 '+db.events+'건 · 전조 표본 '+db.examples.length+'건 · 현재 비교 '+matches.length+'종 · 상위 '+top.length+'종';
-   out.innerHTML='<article class="pattern-card"><b>최근 365일 실제 급등 직전 패턴 유사도 TOP 10</b><p>'+escape(progress.textContent)+'</p><p>'+escape(note)+'</p><p>조사 대상은 거래대금 상위 최대 '+DAILY_LIMIT+'종, 현재 비교는 최대 '+CURRENT_LIMIT+'종입니다. 원화마켓 전체를 분석한 결과는 아닙니다. 과거 패턴 DB는 24시간 동안 재사용합니다.</p></article>'+
+   progress.textContent='저장된 과거 DB '+db.examples.length+'건 ('+new Date(db.at).toLocaleDateString('ko-KR')+') · 현재 비교 '+matches.length+'종 · 상위 '+top.length+'종';
+   out.innerHTML='<article class="pattern-card"><b>최근 365일 실제 급등 직전 패턴 유사도 TOP 10</b><p>'+escape(progress.textContent)+'</p><p>'+escape(note)+'</p><p>조사 대상은 거래대금 상위 최대 '+DAILY_LIMIT+'종, 현재 비교는 최대 '+CURRENT_LIMIT+'종입니다. 원화마켓 전체를 분석한 결과는 아닙니다. 과거 패턴 DB는 삭제하거나 직접 재수집하지 않는 한 계속 재사용합니다.</p></article>'+
     (top.length?top.map((m,i)=>'<article class="pattern-card"><div class="pattern-head"><b>'+(i+1)+'. '+escape(m.t.meta?.korean_name||m.t.market)+' <small>'+escape(m.t.market)+'</small></b><span>형태 유사도 '+m.similarity+'/100</span></div><p>현재 '+Number(m.t.trade_price).toLocaleString('ko-KR',{maximumFractionDigits:8})+'원 · 24시간 '+(m.t.signed_change_rate*100).toFixed(2)+'%</p><p>가장 유사한 과거 사례: '+escape(m.nearest.e.name)+' ('+escape(m.nearest.e.market)+') · '+escape(m.nearest.e.date.slice(0,10))+' · 당시 일봉 시가 대비 고가 +'+m.nearest.e.gain.toFixed(1)+'%</p><p>현재 1시간 '+m.f[0].toFixed(2)+'% · 3시간 '+m.f[1].toFixed(2)+'% · 1시간 거래대금 '+m.f[4].toFixed(2)+'배 · 3시간 거래대금 '+m.f[5].toFixed(2)+'배</p><p>이 사례와 비슷하다는 것은 향후 같은 상승폭을 뜻하지 않습니다.</p><button data-add-watch="'+escape(m.t.market)+'">☆ 관심 종목 등록</button></article>').join(''):'<p>현재 비교 가능한 연속 15분봉이 없습니다.</p>');
   }catch(e){progress.textContent='유사도 분석 실패';out.textContent='분석 실패: '+e.message}
-  finally{btn.disabled=false}
+  finally{btn.disabled=false;rebuild.disabled=false}
  }
  $('scanPatterns').onclick=scan;
+ $('rebuildPatterns').onclick=()=>{
+  if(!confirm('저장된 과거 패턴을 삭제하고 1년치 자료를 다시 수집할까요? 첫 수집에는 시간이 오래 걸립니다.'))return;
+  try{localStorage.removeItem(CACHE_KEY)}catch(e){$('scanProgress').textContent='저장된 패턴을 삭제하지 못했습니다.';return}
+  scan();
+ };
 })();
