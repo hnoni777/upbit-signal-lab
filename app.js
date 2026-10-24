@@ -279,28 +279,37 @@ function radarAssessment(t,history){
   breakoutAttempt,closeStrength,pressure,date:last.candle_date_time_kst};
 }
 async function tradeExecution(market){
- // Upbit trades/ticks: ask_bid=ASK means aggressive sell; BID means aggressive buy.
- // Only the most recent 200 prints, not an exhaustive 5-minute history.
  const path='/trades/ticks?market='+encodeURIComponent(market)+'&count=200';
- let ticks;
- try{ticks=await get(path)}catch(e){
-  // Public API fallback if the proxy does not forward this endpoint.
+ let ticks=null,source='',failures=[];
+ for(const [name,url] of [['중계 서버',API+path],['업비트 직접','https://api.upbit.com/v1'+path]]){
   try{
-   const r=await fetch('https://api.upbit.com/v1'+path,{headers:{accept:'application/json'}});
-   if(!r.ok)throw Error('HTTP '+r.status);
-   ticks=await r.json();
-  }catch(err){return {status:'unavailable',reason:'체결 API 조회 불가'}}
+   const controller=new AbortController();
+   const timer=setTimeout(()=>controller.abort(),6500);
+   let response;
+   try{response=await fetch(url,{headers:{accept:'application/json'},signal:controller.signal})}
+   finally{clearTimeout(timer)}
+   if(!response.ok)throw Error('HTTP '+response.status);
+   const data=await response.json();
+   if(!Array.isArray(data))throw Error('체결 배열 아님');
+   ticks=data;source=name;break;
+  }catch(e){failures.push(name+': '+String(e.message||e).slice(0,65))}
  }
- if(!Array.isArray(ticks)||!ticks.length)return {status:'unavailable',reason:'체결 내역 없음'};
- const newest=Math.max(...ticks.map(x=>Number(x.timestamp)||0));
- if(!newest||Date.now()-newest>120000)return {status:'stale',reason:'최근 체결 데이터가 오래됨'};
- const window=ticks.filter(x=>newest-Number(x.timestamp)<=300000&&newest-Number(x.timestamp)>=0);
- const buy=window.filter(x=>x.ask_bid==='BID').reduce((s,x)=>s+Number(x.trade_price)*Number(x.trade_volume),0);
- const sell=window.filter(x=>x.ask_bid==='ASK').reduce((s,x)=>s+Number(x.trade_price)*Number(x.trade_volume),0);
+ if(!ticks)return {status:'unavailable',reason:'체결 API 연결 실패 ('+failures.join('; ')+')'};
+ if(!ticks.length)return {status:'insufficient',reason:'체결 내역 없음'};
+ const normalized=ticks.map(x=>({
+  timestamp:Number(x.timestamp)||Date.parse(x.trade_date_utc+'T'+x.trade_time_utc+'Z'),
+  side:x.ask_bid,amount:Number(x.trade_price)*Number(x.trade_volume)
+ })).filter(x=>Number.isFinite(x.timestamp)&&Number.isFinite(x.amount)&&x.amount>0);
+ if(!normalized.length)return {status:'insufficient',reason:'유효 체결 데이터 없음'};
+ const newest=Math.max(...normalized.map(x=>x.timestamp));
+ if(Date.now()-newest>180000)return {status:'stale',reason:'마지막 체결이 3분 이상 이전',source};
+ const window=normalized.filter(x=>newest-x.timestamp>=0&&newest-x.timestamp<=300000);
+ const buy=window.filter(x=>x.side==='BID').reduce((s,x)=>s+x.amount,0);
+ const sell=window.filter(x=>x.side==='ASK').reduce((s,x)=>s+x.amount,0);
  const total=buy+sell;
- if(window.length<20||total<=0)return {status:'insufficient',reason:'최근 체결 표본 부족 ('+window.length+'건)'};
- return {status:'ok',buy,sell,share:buy/total,ratio:buy/Math.max(sell,1),
-  count:window.length,spanMinutes:Math.round((newest-Math.min(...window.map(x=>Number(x.timestamp))))/60000*10)/10};
+ if(window.length<10||total<=0)return {status:'insufficient',reason:'최근 체결 표본 '+window.length+'건 (최소 10건 필요)',source};
+ return {status:'ok',source,buy,sell,share:buy/total,ratio:buy/Math.max(sell,1),
+  count:window.length,spanMinutes:Math.round((newest-Math.min(...window.map(x=>x.timestamp)))/6000)/10};
 }
 function candidateAssessment(t,history,train,validation){
  const f=extractFeatures(history,history.length-1);
@@ -371,16 +380,27 @@ $('scanPatterns').onclick=async()=>{
    radar.push({...x,execution,score:Math.max(0,Math.min(100,x.score+executionPoints))});
   }
   for(const x of radar){
-   const buy=x.execution.status==='ok'&&x.execution.share>=.55&&x.execution.count>=20;
+   const available=x.execution.status==='ok';
+   const buy=available&&x.execution.share>=.55&&x.execution.count>=10;
    const early=x.change<=5&&x.f[0]<=1.8&&x.f[1]<=3;
+   const volume=x.vol1>=1.15&&x.volumeTrend>=1.1;
+   const candleSupport=x.directionalShare>=.52&&x.closeStrength>=.55;
    const sustained=x.vol1>=1.2&&x.volumeTrend>=1.2&&x.directionalShare>=.5;
-   x.stage=buy&&early&&sustained&&(x.breakoutAttempt||x.closeStrength>=.7)?'strengthening':buy&&early&&x.vol1>=1.15?'detected':'watch';
-   x.stageReason=x.execution.status!=='ok'?'체결 데이터 부족':!buy?'실제 매수 방향 체결 우세 미확인':!early?'이미 상승했거나 단기 상승폭 큼':x.stage==='strengthening'?'매수 체결·거래대금·가격 강도 동반':x.stage==='detected'?'매수 체결 우세 및 거래대금 증가':'거래대금 지속성 또는 가격 강도 부족';
+   x.stage=buy&&early&&sustained&&(x.breakoutAttempt||x.closeStrength>=.7)?'strengthening':
+    buy&&early&&volume?'detected':
+    !available&&early&&volume&&candleSupport?'unconfirmed':'watch';
+   x.stageReason=x.stage==='strengthening'?'체결 매수 우세·거래대금 지속·가격 강도 동반':
+    x.stage==='detected'?'체결 매수 우세·거래대금 증가 감지':
+    x.stage==='unconfirmed'?'분봉 전조는 관찰되지만 체결 데이터가 없어 미확인':
+    !available?'체결 데이터 미확인 (매도 우세로 간주하지 않음)':
+    !buy?'실제 체결 매수 방향 우세 미확인':
+    !early?'이미 상승했거나 단기 상승폭 큼':'거래대금 지속성 또는 가격 강도 부족';
   }
-  const stageOrder={strengthening:0,detected:1,watch:2};
+  const stageOrder={strengthening:0,detected:1,unconfirmed:2,watch:3};
   radar.sort((a,b)=>stageOrder[a.stage]-stageOrder[b.stage]||b.score-a.score);
   const detected=radar.filter(x=>x.stage==='detected'||x.stage==='strengthening');
   const strengthened=radar.filter(x=>x.stage==='strengthening');
+  const unconfirmed=radar.filter(x=>x.stage==='unconfirmed');
   const order={candidate:0,watch:1,monitor:2,risk:3};
   assessments.sort((a,b)=>order[a.category]-order[b.category]||b.rate-a.rate);
   const candidates=assessments.filter(x=>x.category==='candidate');
@@ -401,12 +421,12 @@ $('scanPatterns').onclick=async()=>{
   const excluded=assessments.filter(x=>x.category!=='candidate');
   const diagnostics={noFeatures:records.length-assessments.length,pre:assessments.filter(x=>x.category!=='risk').length,watch:assessments.filter(x=>x.category==='watch').length};
   const observed=assessments.filter(x=>x.category==='watch').sort((a,b)=>b.rate-a.rate).slice(0,5);
-  const radarHTML='<section><h3>1단계 전조 감지 '+detected.length+'종 · 2단계 전조 강화 '+strengthened.length+'종 · 3단계 과거 검증 통과 '+candidates.length+'종</h3><p>1·2단계는 검증된 예측이나 매수 신호가 아닙니다. 3단계만 별도 과거 검증 기준을 통과한 종목입니다.</p>'+
-   (radar.length?radar.map(x=>'<article class="pattern-card"><div class="pattern-head"><b>'+esc(x.name)+' <small>'+esc(x.market)+'</small></b><span>'+(x.stage==='strengthening'?'2단계 전조 강화':x.stage==='detected'?'1단계 전조 감지':'참고 관찰')+' · '+x.score+'/100</span></div><p>판정: '+esc(x.stageReason)+'</p><p>현재 '+fmt(x.price,8)+'원 · 24시간 '+x.change.toFixed(2)+'% · 확정 15분봉 '+esc(x.date)+'</p><p>최근 1시간 거래대금 '+x.vol1.toFixed(2)+'배 · 3시간 '+x.vol3.toFixed(2)+'배 · 1시간 가격 변화 '+x.f[0].toFixed(2)+'% · 3시간 '+x.f[1].toFixed(2)+'%</p><p>최근 3시간 양봉 거래대금 비중 '+(x.directionalShare*100).toFixed(1)+'% · 양봉/음봉 거래대금 '+x.upRatio.toFixed(2)+'배 · 거래대금 추세 '+x.volumeTrend.toFixed(2)+'배</p><p>봉 방향 판단: '+esc(x.pressure)+' · 직전 고점 돌파 시도 '+(x.breakoutAttempt?'있음':'없음')+' · 종가 위치 '+(x.closeStrength*100).toFixed(0)+'%</p><p>실제 최근 체결: '+(x.execution.status==='ok'?'시장가 매수 방향 거래대금 '+(x.execution.share*100).toFixed(1)+'% · 매수/매도 '+x.execution.ratio.toFixed(2)+'배 · 최근 최대 5분 '+x.execution.count+'건 표본':esc(x.execution.reason))+'</p><p>체결 데이터는 최대 200건 표본이며 전체 시장 매수세를 대표하지 않을 수 있습니다. 양봉·음봉 거래대금은 실제 체결 매수·매도량과 다릅니다. 관찰 점수는 상승 확률이나 매수 신호가 아닙니다.</p><button data-add-watch="'+esc(x.market)+'">☆ 관심 종목 등록</button></article>').join(''):'<p>현재 설정한 거래대금 증가 기준을 충족하는 관찰 종목이 없습니다.</p>')+'</section>';
+  const radarHTML='<section><h3>1단계 전조 감지 '+detected.length+'종 · 2단계 전조 강화 '+strengthened.length+'종 · 체결 미확인 관찰 '+unconfirmed.length+'종 · 3단계 과거 검증 통과 '+candidates.length+'종</h3><p>1·2단계는 검증된 예측이나 매수 신호가 아닙니다. 3단계만 별도 과거 검증 기준을 통과한 종목입니다.</p>'+
+   (radar.length?radar.map(x=>'<article class="pattern-card"><div class="pattern-head"><b>'+esc(x.name)+' <small>'+esc(x.market)+'</small></b><span>'+(x.stage==='strengthening'?'2단계 전조 강화':x.stage==='detected'?'1단계 전조 감지':x.stage==='unconfirmed'?'체결 미확인 관찰':'참고 관찰')+' · '+x.score+'/100</span></div><p>판정: '+esc(x.stageReason)+'</p><p>현재 '+fmt(x.price,8)+'원 · 24시간 '+x.change.toFixed(2)+'% · 확정 15분봉 '+esc(x.date)+'</p><p>최근 1시간 거래대금 '+x.vol1.toFixed(2)+'배 · 3시간 '+x.vol3.toFixed(2)+'배 · 1시간 가격 변화 '+x.f[0].toFixed(2)+'% · 3시간 '+x.f[1].toFixed(2)+'%</p><p>최근 3시간 양봉 거래대금 비중 '+(x.directionalShare*100).toFixed(1)+'% · 양봉/음봉 거래대금 '+x.upRatio.toFixed(2)+'배 · 거래대금 추세 '+x.volumeTrend.toFixed(2)+'배</p><p>봉 방향 판단: '+esc(x.pressure)+' · 직전 고점 돌파 시도 '+(x.breakoutAttempt?'있음':'없음')+' · 종가 위치 '+(x.closeStrength*100).toFixed(0)+'%</p><p>실제 최근 체결: '+(x.execution.status==='ok'?'['+esc(x.execution.source)+'] 시장가 매수 방향 거래대금 '+(x.execution.share*100).toFixed(1)+'% · 매수/매도 '+x.execution.ratio.toFixed(2)+'배 · 최근 최대 5분 '+x.execution.count+'건 표본':esc(x.execution.reason))+'</p><p>체결 데이터는 최대 200건 표본이며 전체 시장 매수세를 대표하지 않을 수 있습니다. 양봉·음봉 거래대금은 실제 체결 매수·매도량과 다릅니다. 관찰 점수는 상승 확률이나 매수 신호가 아닙니다.</p><button data-add-watch="'+esc(x.market)+'">☆ 관심 종목 등록</button></article>').join(''):'<p>현재 설정한 거래대금 증가 기준을 충족하는 관찰 종목이 없습니다.</p>')+'</section>';
   out.innerHTML=summary+radarHTML+'<article class="pattern-card"><b>선별 단계 진단</b><p>현재 특징 계산 불가 '+diagnostics.noFeatures+'종 · 초기 조건 통과 '+diagnostics.pre+'종 · 유사 패턴 관찰 '+diagnostics.watch+'종 · 과거 검증 '+(validation.selected>=MIN_VALIDATION_SIGNALS?'신호 '+validation.selected+'건':'신호 부족')+'</p><p>후보 0개는 시장에 기회가 없다는 뜻이 아니라 현재 검증 기준에서 확증되지 않았다는 뜻입니다.</p></article>'+(candidates.length?candidates.map(renderAssessment).join(''):'<article class="pattern-card"><b>현재 검증 기준을 통과한 초기 급등 전조 후보가 없습니다.</b><p>검증에 실패한 신호를 성공한 것처럼 표시하지 않습니다. 아래 관찰 종목은 예측이 검증되지 않은 참고 자료입니다.</p></article>')+
    (observed.length?'<section><h3>검증 미통과 · 초기 움직임 관찰 (매수 신호 아님)</h3>'+observed.map(renderAssessment).join('')+'</section>':'')+
    (excluded.length?'<details><summary>관찰·제외 종목 전체 '+excluded.length+'종 보기</summary>'+excluded.map(renderAssessment).join('')+'</details>':'');
-  progress.textContent='전체 '+screening.all+'종 시세 · 정밀 '+records.length+'/'+targets.length+'종 · 1단계 감지 '+detected.length+'종 · 2단계 강화 '+strengthened.length+'종 · 3단계 검증 '+candidates.length+'종 · 조회 실패 '+failed+'종 · '+new Date().toLocaleTimeString('ko-KR');
+  progress.textContent='전체 '+screening.all+'종 시세 · 정밀 '+records.length+'/'+targets.length+'종 · 1단계 감지 '+detected.length+'종 · 2단계 강화 '+strengthened.length+'종 · 체결 미확인 '+unconfirmed.length+'종 · 3단계 검증 '+candidates.length+'종 · 조회 실패 '+failed+'종 · '+new Date().toLocaleTimeString('ko-KR');
  }catch(e){out.textContent='분석 오류: '+e.message;progress.textContent='분석 실패'}
  finally{btn.disabled=false;scanBusy=false}
 };
