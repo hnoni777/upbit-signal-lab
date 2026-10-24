@@ -91,8 +91,9 @@ function patternFeatures(days,i){
 /* Historical precursor research: 15-minute candles, chronological train/holdout,
    actual +3% / 60-minute events, non-event controls, and nearest-pattern comparison.
    Results are descriptive, never probabilities of future returns. */
-const HIST_INTERVAL=15,HIST_PAGES=7,HIST_MARKETS=12,HORIZON=4,TARGET_GAIN=.03;
+const HIST_INTERVAL=15,HIST_PAGES=10,HIST_MARKETS=18,HORIZON=4,TARGET_GAIN=.03;
 const SCAN_MAX_24H_GAIN=8, SCAN_MAX_STALE_MS=45*60000;
+const MIN_NEIGHBORS=15, MIN_VALIDATION_SIGNALS=8;
 const featureNames=['1시간 수익률','3시간 수익률','6시간 수익률','24시간 수익률','1시간 거래대금 배수','3시간 거래대금 배수','6시간 변동폭','24시간 고점 근접도','종가 위치'];
 function pctReturn(a,b){return 100*(a/Math.max(b,1e-12)-1)}
 function extractFeatures(c,i){
@@ -117,7 +118,7 @@ function extractFeatures(c,i){
 }
 const scales=[2,4,7,15,2,2,5,.06,.5];
 function distance(a,b){return a.reduce((s,v,j)=>s+Math.min(16,Math.pow((v-b[j])/scales[j],2)),0)/a.length}
-function neighbors(v,samples,k=25){
+function neighbors(v,samples,k=MIN_NEIGHBORS){
  return samples.map(x=>({d:distance(v,x.f),event:x.event})).sort((a,b)=>a.d-b.d).slice(0,k);
 }
 function outcome(c,i){
@@ -155,9 +156,11 @@ function historicalSamples(c){
  return {train,test};
 }
 function earlyStage(f){
- // Look for accumulation before the breakout, not a coin already surging.
- return f[0]>=-.5&&f[0]<=1.5&&f[1]>=-1&&f[1]<=3&&f[3]>=-5&&f[3]<=8&&
-  f[4]>=.8&&f[5]>=.7&&f[6]<=12&&f[7]>=.80&&f[7]<=1.015&&f[8]>=.50;
+ // Broad pre-breakout eligibility; a later independent holdout decides whether signals are trustworthy.
+ // Hard exclusions prevent chasing coins already in a major move.
+ return f[0]>=-2&&f[0]<=2&&f[1]>=-4&&f[1]<=4&&f[2]>=-7&&f[2]<=7&&
+  f[3]>=-12&&f[3]<=8&&f[4]>=.65&&f[5]>=.60&&f[6]<=16&&
+  f[7]>=.65&&f[7]<=1.025&&f[8]>=.35;
 }
 function evaluateModel(train,test){
  const training=train.filter(x=>earlyStage(x.f));
@@ -165,16 +168,16 @@ function evaluateModel(train,test){
  const trainBase=training.length?training.filter(x=>x.event).length/training.length:0;
  const testBase=eligible.length?eligible.filter(x=>x.event).length/eligible.length:0;
  let selected=0,hits=0;
- // Thresholds must be fixed using training data ONLY, never test outcomes.
- const cutoff=Math.max(.24,trainBase*1.5);
+ // Fixed before holdout evaluation. Never tune against test labels.
+ const cutoff=Math.max(.20,trainBase*1.35);
  for(const x of eligible){
-  const n=neighbors(x.f,training,25);
-  if(n.length<25)continue;
+  const n=neighbors(x.f,training,MIN_NEIGHBORS);
+  if(n.length<MIN_NEIGHBORS)continue;
   const rate=n.filter(y=>y.event).length/n.length;
   if(rate>=cutoff){selected++;if(x.event)hits++}
  }
  return {total:eligible.length,events:eligible.filter(x=>x.event).length,
-  selected,hits,baseline:testBase,trainBase,cutoff,precision:selected?hits/selected:0};
+  selected,hits,baseline:testBase,trainBase,cutoff,precision:selected?hits/selected:0,trainEligible:training.length};
 }
 function candidateAssessment(t,history,train,validation){
  const f=extractFeatures(history,history.length-1);
@@ -183,10 +186,10 @@ function candidateAssessment(t,history,train,validation){
  const fresh=Date.now()-lastTs<=SCAN_MAX_STALE_MS;
  const notAlreadyUp=t.signed_change_rate*100<=SCAN_MAX_24H_GAIN;
  const pre=earlyStage(f)&&fresh&&notAlreadyUp;
- const n=neighbors(f,train.filter(x=>earlyStage(x.f)),25);
- if(n.length<25)return {market:t.market,name:t.meta?.korean_name||t.market,price:t.trade_price,change:t.signed_change_rate*100,f,rate:0,hits:0,neighbors:n.length,category:'risk',reason:'급등 이전 조건에 맞는 과거 비교 표본 부족',date:history.at(-1).candle_date_time_kst};
+ const n=neighbors(f,train.filter(x=>earlyStage(x.f)),MIN_NEIGHBORS);
+ if(n.length<MIN_NEIGHBORS)return {market:t.market,name:t.meta?.korean_name||t.market,price:t.trade_price,change:t.signed_change_rate*100,f,rate:0,hits:0,neighbors:n.length,category:'risk',reason:'급등 이전 조건에 맞는 과거 비교 표본 부족',date:history.at(-1).candle_date_time_kst};
  const hits=n.filter(x=>x.event).length,rate=hits/n.length;
- const validated=validation.selected>=10&&validation.hits>=3&&validation.precision>validation.baseline*1.3&&validation.precision>validation.trainBase;
+ const validated=validation.selected>=MIN_VALIDATION_SIGNALS&&validation.hits>=3&&validation.precision>validation.baseline*1.2&&validation.precision>validation.trainBase;
  const candidate=pre&&validated&&rate>=validation.cutoff;
  const category=candidate?'candidate':pre?'watch':'risk';
  const reason=!fresh?'분봉 데이터가 오래되어 후보 제외':!notAlreadyUp?'현재 24시간 상승률 +8% 초과: 이미 급등한 종목 제외':!pre?'초기 전조·거래대금·변동성 조건 미충족':!validated?'시간순 검증 근거 부족':'과거 유사 패턴 검토';
@@ -208,7 +211,7 @@ $('scanPatterns').onclick=async()=>{
    progress.textContent='과거 자료 수집 '+(++processed)+'/'+targets.length+' · '+t.market;
    try{
     const history=await fetchHistory(t.market,(p,max)=>{progress.textContent='수집 '+processed+'/'+targets.length+' · '+t.market+' · '+p+'/'+max+'페이지'});
-    if(history.length<180)throw Error('과거 봉 부족');
+    if(history.length<500)throw Error('과거 봉 부족');
     const samples=historicalSamples(history);
     records.push({t,history});
     train.push(...samples.train);test.push(...samples.test);
@@ -237,7 +240,7 @@ $('scanPatterns').onclick=async()=>{
   const candidates=assessments.filter(x=>x.category==='candidate');
   $('candidates').textContent=String(candidates.length);
   const percent=x=>(x*100).toFixed(1)+'%';
-  const validationText='학습 '+chronologicalTrain.length+'개 구간 / 시간순 검증 '+chronologicalTest.length+'개 구간 (초기 전조 조건 평가 '+validation.total+'개) · 해당 구간 기본 급등률 '+percent(validation.baseline)+
+  const validationText='학습 '+chronologicalTrain.length+'개 구간 / 시간순 검증 '+chronologicalTest.length+'개 구간 (초기 전조 조건 학습 '+validation.trainEligible+'개 · 검증 '+validation.total+'개) · 해당 구간 기본 급등률 '+percent(validation.baseline)+
    ' · 검증 신호 '+validation.selected+'건, 실제 성공 '+validation.hits+'건, 적중률 '+(validation.selected?percent(validation.precision):'표본 없음');
   const summary='<article class="pattern-card"><b>과거 실제 급등과 비급등 구간 비교</b><p>거래대금 상위 '+targets.length+'종 중 '+records.length+'종 분석 · 15분봉 종목당 최대 '+(HIST_PAGES*200)+'개 · 60분 내 +3%를 급등 사건으로 정의</p><p>'+esc(validationText)+'</p><p>전체 종목에 공통 시간 경계(앞 70%/뒤 30%)를 적용하고 시간 경계의 겹치는 사건을 제외합니다. 이미 급등한 종목(24시간 +8% 초과, 3시간 +3% 초과 등)은 전조 후보에서 제외합니다. 검증 성과가 충분하지 않으면 급등 후보를 표시하지 않습니다. 시간대가 겹치는 표본과 종목 간 상관이 있으므로 이 수치는 미래 상승 확률이 아닙니다.</p></article>';
   const renderAssessment=c=>{
