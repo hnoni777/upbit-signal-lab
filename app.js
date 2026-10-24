@@ -278,6 +278,30 @@ function radarAssessment(t,history){
   change,f,score,vol1,vol3,upRatio,directionalShare,volumeTrend,
   breakoutAttempt,closeStrength,pressure,date:last.candle_date_time_kst};
 }
+async function tradeExecution(market){
+ // Upbit trades/ticks: ask_bid=ASK means aggressive sell; BID means aggressive buy.
+ // Only the most recent 200 prints, not an exhaustive 5-minute history.
+ const path='/trades/ticks?market='+encodeURIComponent(market)+'&count=200';
+ let ticks;
+ try{ticks=await get(path)}catch(e){
+  // Public API fallback if the proxy does not forward this endpoint.
+  try{
+   const r=await fetch('https://api.upbit.com/v1'+path,{headers:{accept:'application/json'}});
+   if(!r.ok)throw Error('HTTP '+r.status);
+   ticks=await r.json();
+  }catch(err){return {status:'unavailable',reason:'체결 API 조회 불가'}}
+ }
+ if(!Array.isArray(ticks)||!ticks.length)return {status:'unavailable',reason:'체결 내역 없음'};
+ const newest=Math.max(...ticks.map(x=>Number(x.timestamp)||0));
+ if(!newest||Date.now()-newest>120000)return {status:'stale',reason:'최근 체결 데이터가 오래됨'};
+ const window=ticks.filter(x=>newest-Number(x.timestamp)<=300000&&newest-Number(x.timestamp)>=0);
+ const buy=window.filter(x=>x.ask_bid==='BID').reduce((s,x)=>s+Number(x.trade_price)*Number(x.trade_volume),0);
+ const sell=window.filter(x=>x.ask_bid==='ASK').reduce((s,x)=>s+Number(x.trade_price)*Number(x.trade_volume),0);
+ const total=buy+sell;
+ if(window.length<20||total<=0)return {status:'insufficient',reason:'최근 체결 표본 부족 ('+window.length+'건)'};
+ return {status:'ok',buy,sell,share:buy/total,ratio:buy/Math.max(sell,1),
+  count:window.length,spanMinutes:Math.round((newest-Math.min(...window.map(x=>Number(x.timestamp))))/60000*10)/10};
+}
 function candidateAssessment(t,history,train,validation){
  const f=extractFeatures(history,history.length-1);
  if(!f)return null;
@@ -338,7 +362,15 @@ $('scanPatterns').onclick=async()=>{
   }
   const validation=evaluateModel(chronologicalTrain,chronologicalTest);
   const assessments=records.map(x=>candidateAssessment(x.t,x.history,chronologicalTrain,validation)).filter(Boolean);
-  const radar=records.map(x=>radarAssessment(x.t,x.history)).filter(Boolean).sort((a,b)=>b.score-a.score).slice(0,8);
+  const radarBase=records.map(x=>radarAssessment(x.t,x.history)).filter(Boolean).sort((a,b)=>b.score-a.score).slice(0,8);
+  const radar=[];
+  for(const x of radarBase){
+   const execution=await tradeExecution(x.market);
+   // Score is unchanged when ticks are unavailable; never substitute candle direction for real trades.
+   const executionPoints=execution.status==='ok'?Math.round((execution.share-.5)*30):0;
+   radar.push({...x,execution,score:Math.max(0,Math.min(100,x.score+executionPoints))});
+  }
+  radar.sort((a,b)=>b.score-a.score);
   const order={candidate:0,watch:1,monitor:2,risk:3};
   assessments.sort((a,b)=>order[a.category]-order[b.category]||b.rate-a.rate);
   const candidates=assessments.filter(x=>x.category==='candidate');
@@ -360,7 +392,7 @@ $('scanPatterns').onclick=async()=>{
   const diagnostics={noFeatures:records.length-assessments.length,pre:assessments.filter(x=>x.category!=='risk').length,watch:assessments.filter(x=>x.category==='watch').length};
   const observed=assessments.filter(x=>x.category==='watch').sort((a,b)=>b.rate-a.rate).slice(0,5);
   const radarHTML='<section><h3>실시간 전조 관찰 · '+radar.length+'종 (검증된 매수 신호 아님)</h3>'+
-   (radar.length?radar.map(x=>'<article class="pattern-card"><div class="pattern-head"><b>'+esc(x.name)+' <small>'+esc(x.market)+'</small></b><span>관찰 점수 '+x.score+'/100</span></div><p>현재 '+fmt(x.price,8)+'원 · 24시간 '+x.change.toFixed(2)+'% · 확정 15분봉 '+esc(x.date)+'</p><p>최근 1시간 거래대금 '+x.vol1.toFixed(2)+'배 · 3시간 '+x.vol3.toFixed(2)+'배 · 1시간 가격 변화 '+x.f[0].toFixed(2)+'% · 3시간 '+x.f[1].toFixed(2)+'%</p><p>최근 3시간 양봉 거래대금 비중 '+(x.directionalShare*100).toFixed(1)+'% · 양봉/음봉 거래대금 '+x.upRatio.toFixed(2)+'배 · 거래대금 추세 '+x.volumeTrend.toFixed(2)+'배</p><p>봉 방향 판단: '+esc(x.pressure)+' · 직전 고점 돌파 시도 '+(x.breakoutAttempt?'있음':'없음')+' · 종가 위치 '+(x.closeStrength*100).toFixed(0)+'%</p><p>양봉·음봉 거래대금은 실제 체결 매수·매도량과 다릅니다. 관찰 점수는 상승 확률이나 매수 신호가 아닙니다.</p><button data-add-watch="'+esc(x.market)+'">☆ 관심 종목 등록</button></article>').join(''):'<p>현재 설정한 거래대금 증가 기준을 충족하는 관찰 종목이 없습니다.</p>')+'</section>';
+   (radar.length?radar.map(x=>'<article class="pattern-card"><div class="pattern-head"><b>'+esc(x.name)+' <small>'+esc(x.market)+'</small></b><span>관찰 점수 '+x.score+'/100</span></div><p>현재 '+fmt(x.price,8)+'원 · 24시간 '+x.change.toFixed(2)+'% · 확정 15분봉 '+esc(x.date)+'</p><p>최근 1시간 거래대금 '+x.vol1.toFixed(2)+'배 · 3시간 '+x.vol3.toFixed(2)+'배 · 1시간 가격 변화 '+x.f[0].toFixed(2)+'% · 3시간 '+x.f[1].toFixed(2)+'%</p><p>최근 3시간 양봉 거래대금 비중 '+(x.directionalShare*100).toFixed(1)+'% · 양봉/음봉 거래대금 '+x.upRatio.toFixed(2)+'배 · 거래대금 추세 '+x.volumeTrend.toFixed(2)+'배</p><p>봉 방향 판단: '+esc(x.pressure)+' · 직전 고점 돌파 시도 '+(x.breakoutAttempt?'있음':'없음')+' · 종가 위치 '+(x.closeStrength*100).toFixed(0)+'%</p><p>실제 최근 체결: '+(x.execution.status==='ok'?'시장가 매수 방향 거래대금 '+(x.execution.share*100).toFixed(1)+'% · 매수/매도 '+x.execution.ratio.toFixed(2)+'배 · 최근 최대 5분 '+x.execution.count+'건 표본':esc(x.execution.reason))+'</p><p>체결 데이터는 최대 200건 표본이며 전체 시장 매수세를 대표하지 않을 수 있습니다. 양봉·음봉 거래대금은 실제 체결 매수·매도량과 다릅니다. 관찰 점수는 상승 확률이나 매수 신호가 아닙니다.</p><button data-add-watch="'+esc(x.market)+'">☆ 관심 종목 등록</button></article>').join(''):'<p>현재 설정한 거래대금 증가 기준을 충족하는 관찰 종목이 없습니다.</p>')+'</section>';
   out.innerHTML=summary+radarHTML+'<article class="pattern-card"><b>선별 단계 진단</b><p>현재 특징 계산 불가 '+diagnostics.noFeatures+'종 · 초기 조건 통과 '+diagnostics.pre+'종 · 유사 패턴 관찰 '+diagnostics.watch+'종 · 과거 검증 '+(validation.selected>=MIN_VALIDATION_SIGNALS?'신호 '+validation.selected+'건':'신호 부족')+'</p><p>후보 0개는 시장에 기회가 없다는 뜻이 아니라 현재 검증 기준에서 확증되지 않았다는 뜻입니다.</p></article>'+(candidates.length?candidates.map(renderAssessment).join(''):'<article class="pattern-card"><b>현재 검증 기준을 통과한 초기 급등 전조 후보가 없습니다.</b><p>검증에 실패한 신호를 성공한 것처럼 표시하지 않습니다. 아래 관찰 종목은 예측이 검증되지 않은 참고 자료입니다.</p></article>')+
    (observed.length?'<section><h3>검증 미통과 · 초기 움직임 관찰 (매수 신호 아님)</h3>'+observed.map(renderAssessment).join('')+'</section>':'')+
    (excluded.length?'<details><summary>관찰·제외 종목 전체 '+excluded.length+'종 보기</summary>'+excluded.map(renderAssessment).join('')+'</details>':'');
