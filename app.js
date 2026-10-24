@@ -150,31 +150,38 @@ function historicalSamples(c){
  }
  return {train,test};
 }
+function earlyStage(f){
+ // Look for accumulation before the breakout, not a coin already surging.
+ return f[0]>=-.5&&f[0]<=1.5&&f[1]>=-1&&f[1]<=3&&f[3]>=-5&&f[3]<=8&&
+  f[4]>=.8&&f[5]>=.7&&f[6]<=12&&f[7]>=.80&&f[7]<=1.015&&f[8]>=.50;
+}
 function evaluateModel(train,test){
- const base=test.length?test.filter(x=>x.event).length/test.length:0;
+ const eligible=test.filter(x=>earlyStage(x.f));
+ const base=eligible.length?eligible.filter(x=>x.event).length/eligible.length:0;
  let selected=0,hits=0;
- for(const x of test){
-  const n=neighbors(x.f,train,25);
+ for(const x of eligible){
+  const n=neighbors(x.f,train.filter(y=>earlyStage(y.f)),25);
   if(n.length<25)continue;
   const rate=n.filter(y=>y.event).length/n.length;
   if(rate>=.24&&rate>=base*1.5){
    selected++;if(x.event)hits++;
   }
  }
- return {total:test.length,events:test.filter(x=>x.event).length,selected,hits,baseline:base,precision:selected?hits/selected:0};
+ return {total:eligible.length,events:eligible.filter(x=>x.event).length,selected,hits,baseline:base,precision:selected?hits/selected:0};
 }
 function candidateAssessment(t,history,train,validation){
  const f=extractFeatures(history,history.length-1);
  if(!f)return null;
- const n=neighbors(f,train,25);
- if(n.length<25)return null;
+ const pre=earlyStage(f);
+ const n=neighbors(f,train.filter(x=>earlyStage(x.f)),25);
+ if(n.length<25)return {market:t.market,name:t.meta?.korean_name||t.market,price:t.trade_price,change:t.signed_change_rate*100,f,rate:0,hits:0,neighbors:n.length,category:'risk',reason:'급등 이전 조건에 맞는 과거 비교 표본 부족',date:history.at(-1).candle_date_time_kst};
  const hits=n.filter(x=>x.event).length,rate=hits/n.length;
- const rising=f[0]>0&&f[1]>0&&f[8]>=.55;
  const validated=validation.selected>=10&&validation.hits>=3&&validation.precision>validation.baseline*1.3;
- const candidate=rising&&validated&&rate>=.24&&rate>=validation.baseline*1.5;
- const category=candidate?'candidate':rising?'watch':'risk';
+ const candidate=pre&&validated&&rate>=.24&&rate>=validation.baseline*1.5;
+ const category=candidate?'candidate':pre?'watch':'risk';
+ const reason=!pre?'이미 상승 진행 중이거나 초기 매집·거래대금·변동성 조건 미충족':!validated?'시간순 검증 근거 부족':'과거 유사 패턴 검토';
  return {market:t.market,name:t.meta?.korean_name||t.market,price:t.trade_price,change:t.signed_change_rate*100,
-  f,rate,hits,neighbors:n.length,category,date:history.at(-1).candle_date_time_kst};
+  f,rate,hits,neighbors:n.length,category,reason,date:history.at(-1).candle_date_time_kst};
 }
 $('scanPatterns').onclick=async()=>{
  if(scanBusy)return;
@@ -210,15 +217,15 @@ $('scanPatterns').onclick=async()=>{
   const candidates=assessments.filter(x=>x.category==='candidate');
   $('candidates').textContent=String(candidates.length);
   const percent=x=>(x*100).toFixed(1)+'%';
-  const validationText='학습 '+train.length+'개 구간 / 독립 시간순 검증 '+test.length+'개 구간 · 검증 기본 급등률 '+percent(validation.baseline)+
+  const validationText='학습 '+train.length+'개 구간 / 시간순 검증 '+test.length+'개 구간 (초기 전조 조건 평가 '+validation.total+'개) · 해당 구간 기본 급등률 '+percent(validation.baseline)+
    ' · 검증 신호 '+validation.selected+'건, 실제 성공 '+validation.hits+'건, 적중률 '+(validation.selected?percent(validation.precision):'표본 없음');
-  const summary='<article class="pattern-card"><b>과거 실제 급등과 비급등 구간 비교</b><p>거래대금 상위 '+targets.length+'종 중 '+records.length+'종 분석 · 15분봉 종목당 최대 '+(HIST_PAGES*200)+'개 · 60분 내 +3%를 급등 사건으로 정의</p><p>'+esc(validationText)+'</p><p>학습은 앞 70%, 검증은 뒤 30%를 사용합니다. 검증 성과가 충분하지 않으면 급등 후보를 표시하지 않습니다. 시간대가 겹치는 표본과 종목 간 상관이 있으므로 이 수치는 미래 상승 확률이 아닙니다.</p></article>';
+  const summary='<article class="pattern-card"><b>과거 실제 급등과 비급등 구간 비교</b><p>거래대금 상위 '+targets.length+'종 중 '+records.length+'종 분석 · 15분봉 종목당 최대 '+(HIST_PAGES*200)+'개 · 60분 내 +3%를 급등 사건으로 정의</p><p>'+esc(validationText)+'</p><p>학습은 앞 70%, 검증은 뒤 30%를 사용합니다. 이미 급등한 종목(24시간 +8% 초과, 3시간 +3% 초과 등)은 전조 후보에서 제외합니다. 검증 성과가 충분하지 않으면 급등 후보를 표시하지 않습니다. 시간대가 겹치는 표본과 종목 간 상관이 있으므로 이 수치는 미래 상승 확률이 아닙니다.</p></article>';
   out.innerHTML=summary+(assessments.length?assessments.map(c=>{
-   const label=c.category==='candidate'?'급등 전조 후보 (제한적 검증)':c.category==='watch'?'상승 관찰 · 검증 부족':'위험/중립 · 상승 확인 부족';
+   const label=c.category==='candidate'?'초기 급등 전조 후보 (제한적 검증)':c.category==='watch'?'초기 움직임 관찰 · 검증 부족':'전조 제외 · 이미 상승 또는 조건 미충족';
    const details=c.f.map((x,i)=>featureNames[i]+': '+(i===7||i===8?(x*100).toFixed(1)+'%':i===4||i===5?x.toFixed(2)+'배':x.toFixed(2)+'%'));
    return '<article class="pattern-card"><div class="pattern-head"><b>'+esc(c.name)+' <small>'+esc(c.market)+'</small></b><span>'+label+'</span></div>'+
     '<p>현재 '+fmt(c.price,8)+'원 · 24시간 '+c.change.toFixed(2)+'% · 확정 15분봉 '+esc(c.date)+'</p>'+
-    '<p><b>과거 유사 구간 '+c.neighbors+'개 중 60분 내 +3% 발생 '+c.hits+'개 ('+percent(c.rate)+')</b> · 유사도 비교는 학습 데이터에서만 수행</p>'+
+    '<p><b>판단: '+esc(c.reason)+'</b></p><p><b>과거 유사 구간 '+c.neighbors+'개 중 60분 내 +3% 발생 '+c.hits+'개 ('+percent(c.rate)+')</b> · 유사도 비교는 학습 데이터에서만 수행</p>'+
     '<ul>'+details.map(d=>'<li>'+esc(d)+'</li>').join('')+'</ul>'+
     '<button data-add-watch="'+esc(c.market)+'">☆ 관심 종목 등록</button></article>';
   }).join(''):'<p>현재 평가 가능한 종목이 없습니다.</p>');
