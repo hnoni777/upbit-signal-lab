@@ -25,11 +25,6 @@ async function load(){
  finally{loading=false}
 }
 function render(){
- const q=$('search').value.toLowerCase(),order=$('sort').value;
- let list=tickers.filter(t=>(t.market+' '+(t.meta?.korean_name||'')).toLowerCase().includes(q));
- list.sort((a,b)=>order==='volume'?b.acc_trade_price_24h-a.acc_trade_price_24h:order==='change'?b.signed_change_rate-a.signed_change_rate:score(b)-score(a));
- $('candidates').textContent=fmt(tickers.filter(t=>score(t)>=75).length);
- $('coins').innerHTML=list.map(t=>'<tr><td><b>'+esc(t.meta?.korean_name||t.market)+'</b><br><span class="muted">'+esc(t.market)+'</span></td><td class="'+(t.signed_change_rate>=0?'positive':'negative')+'">'+(t.signed_change_rate>=0?'+':'')+(t.signed_change_rate*100).toFixed(2)+'%</td><td>'+fmt(t.acc_trade_price_24h/1e8,1)+'억</td><td>'+score(t)+'점</td><td><button class="star" data-market="'+esc(t.market)+'">'+(watch.has(t.market)?'★':'☆')+'</button></td></tr>').join('')||'<tr><td colspan="5">일치하는 종목이 없습니다.</td></tr>';
  $('watchlist').innerHTML=[...watch].map(m=>{const t=tickers.find(x=>x.market===m);return '<div class="watchitem"><span>'+esc(t?.meta?.korean_name||m)+' ('+esc(m)+')</span><span>'+(t?fmt(t.trade_price,8)+'원':'시세 대기')+'</span></div>'}).join('')||'<p>관심 종목이 없습니다.</p>';
  const shib=tickers.find(t=>t.market==='KRW-SHIB');
  $('shibStatus').textContent=shib?'현재 '+fmt(shib.trade_price,8)+'원 · '+(shib.trade_price>=0.00727?'본전 기준 이상':'본전 기준 미만')+' (수수료 제외)':'시바이누 시세 없음';
@@ -70,9 +65,64 @@ function checkAlerts(){
  }
 }
 
-$('coins').addEventListener('click',e=>{const b=e.target.closest('[data-market]');if(!b)return;const m=b.dataset.market;watch.has(m)?watch.delete(m):watch.add(m);localStorage.setItem('usl-watch',JSON.stringify([...watch]));render()});
-$('search').oninput=render;$('sort').onchange=render;$('refresh').onclick=load;
+$('refresh').onclick=load;
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-tab]').forEach(x=>x.classList.toggle('active',x===b));document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active',p.id===b.dataset.tab))});
+
+let scanBusy=false;
+const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+function patternEvidence(candles,ticker){
+ if(!Array.isArray(candles)||candles.length<45)return null;
+ // Use only completed daily candles, avoiding the still-forming candle.
+ const kstDate=new Date(Date.now()+9*3600000).toISOString().slice(0,10);
+ const days=candles.filter(c=>c.candle_date_time_kst.slice(0,10)<kstDate).sort((a,b)=>a.candle_date_time_kst.localeCompare(b.candle_date_time_kst));
+ if(days.length<40)return null;
+ const last=days.at(-1),prev=days.slice(-21,-1),recent=days.slice(-6,-1);
+ const avgVol=prev.reduce((s,c)=>s+c.candle_acc_trade_price,0)/prev.length;
+ const volRatio=last.candle_acc_trade_price/Math.max(avgVol,1);
+ const prevRange=(Math.max(...prev.map(c=>c.high_price))-Math.min(...prev.map(c=>c.low_price)))/Math.max(prev.at(-1).trade_price,1e-12);
+ const recentRange=(Math.max(...recent.map(c=>c.high_price))-Math.min(...recent.map(c=>c.low_price)))/Math.max(recent.at(-1).trade_price,1e-12);
+ const rangeRatio=recentRange/Math.max(prevRange,1e-9);
+ const resistance=Math.max(...prev.map(c=>c.high_price));
+ const proximity=last.trade_price/resistance;
+ const dayChange=(last.trade_price/last.prev_closing_price-1)*100;
+ const reasons=[];
+ if(volRatio>=1.5&&volRatio<=5)reasons.push('전일 확정봉 거래대금이 직전 20일 평균의 '+volRatio.toFixed(2)+'배');
+ if(rangeRatio<=0.65)reasons.push('최근 5일 가격 범위가 이전 20일 범위의 '+(rangeRatio*100).toFixed(0)+'% 수준');
+ if(proximity>=0.95&&proximity<=1.015)reasons.push('전일 종가가 직전 20일 최고가의 '+(proximity*100).toFixed(1)+'% 위치');
+ if(dayChange>=-2&&dayChange<=4)reasons.push('전일 등락 '+dayChange.toFixed(2)+'%로 급등 추격 구간을 일부 제외');
+ if(reasons.length<3||dayChange>4||ticker.signed_change_rate>0.10)return null;
+ return {market:ticker.market,name:ticker.meta?.korean_name||ticker.market,reasons,count:reasons.length,volRatio,rangeRatio,proximity,price:ticker.trade_price,change:ticker.signed_change_rate*100,date:last.candle_date_time_kst.slice(0,10)};
+}
+$('scanPatterns').onclick=async()=>{
+ if(scanBusy)return;
+ if(!tickers.length){$('scanProgress').textContent='먼저 시세 연결을 기다려 주세요.';return}
+ scanBusy=true;
+ const btn=$('scanPatterns'),progress=$('scanProgress'),out=$('patternCandidates');
+ btn.disabled=true;out.innerHTML='<p>후보를 분석하고 있습니다...</p>';
+ let failed=0,checked=0;
+ const found=[];
+ const targets=[...tickers].filter(t=>t.acc_trade_price_24h>0).sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h).slice(0,30);
+ try{
+  for(const t of targets){
+   progress.textContent='분석 중 '+(++checked)+' / '+targets.length+' · '+t.market;
+   try{
+    const days=await get('/candles/days?market='+encodeURIComponent(t.market)+'&count=60');
+    const evidence=patternEvidence(days,t);
+    if(evidence)found.push(evidence);
+   }catch(e){failed++}
+   if(checked<targets.length)await pause(180);
+  }
+  found.sort((a,b)=>b.count-a.count||b.volRatio-a.volRatio);
+  $('candidates').textContent=String(found.length);
+  out.innerHTML=found.length?found.map(c=>'<article class="pattern-card"><div class="pattern-head"><b>'+esc(c.name)+' <small>'+esc(c.market)+'</small></b><span>'+c.count+'/4 조건 일치</span></div><p>현재 시세 '+fmt(c.price,8)+'원 · 24시간 '+c.change.toFixed(2)+'%</p><b>후보 선정 근거 (완성 일봉 '+esc(c.date)+')</b><ul>'+c.reasons.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul><p>단기 상승 여부는 확인되지 않았습니다. 실시간 호가·체결 데이터는 반영되지 않습니다.</p><button data-add-watch="'+esc(c.market)+'">☆ 관심 종목 등록</button></article>').join(''):'<p>현재 설정한 조건에 일치하는 후보가 없습니다. 조건을 충족하지 않은 코인은 표시하지 않습니다.</p>';
+  progress.textContent='완료 · '+checked+'종 확인 · '+found.length+'종 후보 · '+failed+'종 조회 실패 · '+new Date().toLocaleTimeString('ko-KR');
+ }finally{btn.disabled=false;scanBusy=false}
+};
+$('patternCandidates').addEventListener('click',e=>{
+ const b=e.target.closest('[data-add-watch]');if(!b)return;
+ watch.add(b.dataset.addWatch);localStorage.setItem('usl-watch',JSON.stringify([...watch]));render();b.textContent='★ 관심 종목 등록됨';
+});
+
 // Daily-candle research, with explicit out-of-sample time split.
 $('runBacktest').onclick=async()=>{
  const out=$('backtestResult'),btn=$('runBacktest');
