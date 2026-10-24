@@ -1,5 +1,5 @@
 'use strict';
-const API='https://api.upbit.com/v1';
+const API='https://upbit-signal-proxy.parkdam6.workers.dev/v1';
 let markets=[],tickers=[];
 let watch=new Set(JSON.parse(localStorage.getItem('usl-watch')||'["KRW-SHIB"]'));
 const $=id=>document.getElementById(id);
