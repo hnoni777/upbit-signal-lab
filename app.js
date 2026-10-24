@@ -290,7 +290,7 @@ $('scanPatterns').onclick=async()=>{
    // Yield for mobile rendering and avoid hammering the public API.
    await pause(180);
   }
-  if(train.length<100||test.length<30){
+  if(train.length<130){
    out.innerHTML='<p>과거 데이터가 충분하지 않아 후보를 표시하지 않습니다. 수집 '+records.length+'종, 학습 '+train.length+'건, 검증 '+test.length+'건. API 조회 상태를 확인하세요.</p>';
    $('candidates').textContent='0';
    progress.textContent='학습 자료 부족 · 조회 실패 '+failed+'종';return;
