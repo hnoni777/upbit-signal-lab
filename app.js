@@ -21,7 +21,7 @@ async function load(){
   $('count').textContent=fmt(tickers.length);
   $('updated').textContent=new Date().toLocaleTimeString('ko-KR');
   $('status').textContent='시세 연결됨';render();checkAlerts();
- }catch(e){$('status').textContent='조회 실패';$('coins').innerHTML='<tr><td colspan="5">조회 실패: '+esc(e.message)+' · 새로고침을 눌러 주세요.</td></tr>'}
+ }catch(e){$('status').textContent='조회 실패';$('scanProgress').textContent='시세 조회 실패: '+e.message}
  finally{loading=false}
 }
 function render(){
@@ -70,29 +70,46 @@ document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{document.query
 
 let scanBusy=false;
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const STABLE_SYMBOLS=new Set(['USDT','USDC','DAI','TUSD','USDD','FDUSD','USDP','PYUSD','EURC','BUSD','USD1','RLUSD']);
+function patternFeatures(days,i){
+ if(i<21)return null;
+ const last=days[i],prev=days.slice(i-20,i),recent=days.slice(i-5,i);
+ const avg=prev.reduce((s,c)=>s+c.candle_acc_trade_price,0)/20;
+ const volume=last.candle_acc_trade_price/Math.max(avg,1);
+ const range20=(Math.max(...prev.map(c=>c.high_price))-Math.min(...prev.map(c=>c.low_price)))/Math.max(prev.at(-1).trade_price,1e-12);
+ const range5=(Math.max(...recent.map(c=>c.high_price))-Math.min(...recent.map(c=>c.low_price)))/Math.max(recent.at(-1).trade_price,1e-12);
+ const compression=range5/Math.max(range20,1e-9);
+ const proximity=last.trade_price/Math.max(...prev.map(c=>c.high_price));
+ const dayChange=(last.trade_price/Math.max(last.prev_closing_price,1e-12)-1)*100;
+ const volumeOK=volume>=1.5&&volume<=5;
+ const compressed=compression<=0.65;
+ const nearHigh=proximity>=0.95&&proximity<=1.015;
+ const notChasing=dayChange>=-2&&dayChange<=4;
+ return {volume,compression,proximity,dayChange,volumeOK,compressed,nearHigh,notChasing,count:[volumeOK,compressed,nearHigh,notChasing].filter(Boolean).length};
+}
 function patternEvidence(candles,ticker){
- if(!Array.isArray(candles)||candles.length<45)return null;
- // Use only completed daily candles, avoiding the still-forming candle.
+ if(!Array.isArray(candles)||candles.length<90)return null;
  const kstDate=new Date(Date.now()+9*3600000).toISOString().slice(0,10);
  const days=candles.filter(c=>c.candle_date_time_kst.slice(0,10)<kstDate).sort((a,b)=>a.candle_date_time_kst.localeCompare(b.candle_date_time_kst));
- if(days.length<40)return null;
- const last=days.at(-1),prev=days.slice(-21,-1),recent=days.slice(-6,-1);
- const avgVol=prev.reduce((s,c)=>s+c.candle_acc_trade_price,0)/prev.length;
- const volRatio=last.candle_acc_trade_price/Math.max(avgVol,1);
- const prevRange=(Math.max(...prev.map(c=>c.high_price))-Math.min(...prev.map(c=>c.low_price)))/Math.max(prev.at(-1).trade_price,1e-12);
- const recentRange=(Math.max(...recent.map(c=>c.high_price))-Math.min(...recent.map(c=>c.low_price)))/Math.max(recent.at(-1).trade_price,1e-12);
- const rangeRatio=recentRange/Math.max(prevRange,1e-9);
- const resistance=Math.max(...prev.map(c=>c.high_price));
- const proximity=last.trade_price/resistance;
- const dayChange=(last.trade_price/last.prev_closing_price-1)*100;
- const reasons=[];
- if(volRatio>=1.5&&volRatio<=5)reasons.push('전일 확정봉 거래대금이 직전 20일 평균의 '+volRatio.toFixed(2)+'배');
- if(rangeRatio<=0.65)reasons.push('최근 5일 가격 범위가 이전 20일 범위의 '+(rangeRatio*100).toFixed(0)+'% 수준');
- if(proximity>=0.95&&proximity<=1.015)reasons.push('전일 종가가 직전 20일 최고가의 '+(proximity*100).toFixed(1)+'% 위치');
- if(dayChange>=-2&&dayChange<=4)reasons.push('전일 등락 '+dayChange.toFixed(2)+'%로 급등 추격 구간을 일부 제외');
- if(reasons.length<3||dayChange>4||ticker.signed_change_rate>0.10)return null;
- return {market:ticker.market,name:ticker.meta?.korean_name||ticker.market,reasons,count:reasons.length,volRatio,rangeRatio,proximity,price:ticker.trade_price,change:ticker.signed_change_rate*100,date:last.candle_date_time_kst.slice(0,10)};
+ if(days.length<85)return null;
+ const f=patternFeatures(days,days.length-1);
+ if(!f||!f.volumeOK||f.count<3||ticker.signed_change_rate>0.10)return null;
+ const reasons=['전일 거래대금 '+f.volume.toFixed(2)+'배 (직전 20일 평균 대비)'];
+ if(f.compressed)reasons.push('최근 5일 가격 범위 '+(f.compression*100).toFixed(0)+'% (이전 20일 대비)');
+ if(f.nearHigh)reasons.push('20일 최고가 대비 종가 위치 '+(f.proximity*100).toFixed(1)+'%');
+ if(f.notChasing)reasons.push('전일 등락 '+f.dayChange.toFixed(2)+'% (급등 추격 일부 제외)');
+ // Compare the exact same rule against earlier historical days, without future leakage.
+ let signals=0,hits=0,events=0,observations=0;
+ for(let i=21;i<days.length-7;i++){
+  const h=patternFeatures(days,i);
+  if(!h)continue;
+  const event=Math.max(...days.slice(i+1,i+8).map(c=>c.high_price))>=days[i].trade_price*1.05;
+  observations++;if(event)events++;
+  if(h.volumeOK&&h.count>=3){signals++;if(event)hits++}
+ }
+ return {market:ticker.market,name:ticker.meta?.korean_name||ticker.market,reasons,count:f.count,volRatio:f.volume,price:ticker.trade_price,change:ticker.signed_change_rate*100,date:days.at(-1).candle_date_time_kst.slice(0,10),history:{signals,hits,events,observations},days:days.length};
 }
+
 $('scanPatterns').onclick=async()=>{
  if(scanBusy)return;
  if(!tickers.length){$('scanProgress').textContent='먼저 시세 연결을 기다려 주세요.';return}
@@ -101,12 +118,12 @@ $('scanPatterns').onclick=async()=>{
  btn.disabled=true;out.innerHTML='<p>후보를 분석하고 있습니다...</p>';
  let failed=0,checked=0;
  const found=[];
- const targets=[...tickers].filter(t=>t.acc_trade_price_24h>0).sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h).slice(0,30);
+ const targets=[...tickers].filter(t=>t.acc_trade_price_24h>0&&!STABLE_SYMBOLS.has(t.market.slice(4))).sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h).slice(0,30);
  try{
   for(const t of targets){
    progress.textContent='분석 중 '+(++checked)+' / '+targets.length+' · '+t.market;
    try{
-    const days=await get('/candles/days?market='+encodeURIComponent(t.market)+'&count=60');
+    const days=await get('/candles/days?market='+encodeURIComponent(t.market)+'&count=200');
     const evidence=patternEvidence(days,t);
     if(evidence)found.push(evidence);
    }catch(e){failed++}
@@ -114,7 +131,12 @@ $('scanPatterns').onclick=async()=>{
   }
   found.sort((a,b)=>b.count-a.count||b.volRatio-a.volRatio);
   $('candidates').textContent=String(found.length);
-  out.innerHTML=found.length?found.map(c=>'<article class="pattern-card"><div class="pattern-head"><b>'+esc(c.name)+' <small>'+esc(c.market)+'</small></b><span>'+c.count+'/4 조건 일치</span></div><p>현재 시세 '+fmt(c.price,8)+'원 · 24시간 '+c.change.toFixed(2)+'%</p><b>후보 선정 근거 (완성 일봉 '+esc(c.date)+')</b><ul>'+c.reasons.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul><p>단기 상승 여부는 확인되지 않았습니다. 실시간 호가·체결 데이터는 반영되지 않습니다.</p><button data-add-watch="'+esc(c.market)+'">☆ 관심 종목 등록</button></article>').join(''):'<p>현재 설정한 조건에 일치하는 후보가 없습니다. 조건을 충족하지 않은 코인은 표시하지 않습니다.</p>';
+  const pct=(a,b)=>b?(100*a/b).toFixed(1)+'%':'표본 부족';
+  out.innerHTML=found.length?found.map(c=>{
+   const h=c.history;
+   return '<article class="pattern-card"><div class="pattern-head"><b>'+esc(c.name)+' <small>'+esc(c.market)+'</small></b><span>'+c.count+'/4 조건 일치</span></div><p>현재 시세 '+fmt(c.price,8)+'원 · 24시간 '+c.change.toFixed(2)+'%</p><b>선정 근거 (확정 일봉 '+esc(c.date)+')</b><ul>'+c.reasons.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul><b>과거 동일 조건 비교 (최근 '+c.days+'개 일봉)</b><p>과거 신호 '+h.signals+'건 · 이후 7일 내 +5% 도달 '+h.hits+'건 · 관찰 적중률 '+pct(h.hits,h.signals)+' · 전체 일자 기본 급등률 '+pct(h.events,h.observations)+'</p><p>과거 표본은 규칙 설계에 사용된 기간과 겹치므로 독립 검증이 아닙니다. 미래 상승 확률로 해석하면 안 됩니다.</p><button data-add-watch="'+esc(c.market)+'">☆ 관심 종목 등록</button></article>';
+  }).join(''):'<p>현재 필수 거래대금 증가 조건을 포함한 전조 후보가 없습니다. 스테이블코인은 제외했습니다.</p>';
+
   progress.textContent='완료 · '+checked+'종 확인 · '+found.length+'종 후보 · '+failed+'종 조회 실패 · '+new Date().toLocaleTimeString('ko-KR');
  }finally{btn.disabled=false;scanBusy=false}
 };
