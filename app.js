@@ -156,18 +156,21 @@ function earlyStage(f){
   f[4]>=.8&&f[5]>=.7&&f[6]<=12&&f[7]>=.80&&f[7]<=1.015&&f[8]>=.50;
 }
 function evaluateModel(train,test){
+ const training=train.filter(x=>earlyStage(x.f));
  const eligible=test.filter(x=>earlyStage(x.f));
- const base=eligible.length?eligible.filter(x=>x.event).length/eligible.length:0;
+ const trainBase=training.length?training.filter(x=>x.event).length/training.length:0;
+ const testBase=eligible.length?eligible.filter(x=>x.event).length/eligible.length:0;
  let selected=0,hits=0;
+ // Thresholds must be fixed using training data ONLY, never test outcomes.
+ const cutoff=Math.max(.24,trainBase*1.5);
  for(const x of eligible){
-  const n=neighbors(x.f,train.filter(y=>earlyStage(y.f)),25);
+  const n=neighbors(x.f,training,25);
   if(n.length<25)continue;
   const rate=n.filter(y=>y.event).length/n.length;
-  if(rate>=.24&&rate>=base*1.5){
-   selected++;if(x.event)hits++;
-  }
+  if(rate>=cutoff){selected++;if(x.event)hits++}
  }
- return {total:eligible.length,events:eligible.filter(x=>x.event).length,selected,hits,baseline:base,precision:selected?hits/selected:0};
+ return {total:eligible.length,events:eligible.filter(x=>x.event).length,
+  selected,hits,baseline:testBase,trainBase,cutoff,precision:selected?hits/selected:0};
 }
 function candidateAssessment(t,history,train,validation){
  const f=extractFeatures(history,history.length-1);
@@ -176,8 +179,8 @@ function candidateAssessment(t,history,train,validation){
  const n=neighbors(f,train.filter(x=>earlyStage(x.f)),25);
  if(n.length<25)return {market:t.market,name:t.meta?.korean_name||t.market,price:t.trade_price,change:t.signed_change_rate*100,f,rate:0,hits:0,neighbors:n.length,category:'risk',reason:'급등 이전 조건에 맞는 과거 비교 표본 부족',date:history.at(-1).candle_date_time_kst};
  const hits=n.filter(x=>x.event).length,rate=hits/n.length;
- const validated=validation.selected>=10&&validation.hits>=3&&validation.precision>validation.baseline*1.3;
- const candidate=pre&&validated&&rate>=.24&&rate>=validation.baseline*1.5;
+ const validated=validation.selected>=10&&validation.hits>=3&&validation.precision>validation.baseline*1.3&&validation.precision>validation.trainBase;
+ const candidate=pre&&validated&&rate>=validation.cutoff;
  const category=candidate?'candidate':pre?'watch':'risk';
  const reason=!pre?'이미 상승 진행 중이거나 초기 매집·거래대금·변동성 조건 미충족':!validated?'시간순 검증 근거 부족':'과거 유사 패턴 검토';
  return {market:t.market,name:t.meta?.korean_name||t.market,price:t.trade_price,change:t.signed_change_rate*100,
@@ -220,15 +223,18 @@ $('scanPatterns').onclick=async()=>{
   const validationText='학습 '+train.length+'개 구간 / 시간순 검증 '+test.length+'개 구간 (초기 전조 조건 평가 '+validation.total+'개) · 해당 구간 기본 급등률 '+percent(validation.baseline)+
    ' · 검증 신호 '+validation.selected+'건, 실제 성공 '+validation.hits+'건, 적중률 '+(validation.selected?percent(validation.precision):'표본 없음');
   const summary='<article class="pattern-card"><b>과거 실제 급등과 비급등 구간 비교</b><p>거래대금 상위 '+targets.length+'종 중 '+records.length+'종 분석 · 15분봉 종목당 최대 '+(HIST_PAGES*200)+'개 · 60분 내 +3%를 급등 사건으로 정의</p><p>'+esc(validationText)+'</p><p>학습은 앞 70%, 검증은 뒤 30%를 사용합니다. 이미 급등한 종목(24시간 +8% 초과, 3시간 +3% 초과 등)은 전조 후보에서 제외합니다. 검증 성과가 충분하지 않으면 급등 후보를 표시하지 않습니다. 시간대가 겹치는 표본과 종목 간 상관이 있으므로 이 수치는 미래 상승 확률이 아닙니다.</p></article>';
-  out.innerHTML=summary+(assessments.length?assessments.map(c=>{
-   const label=c.category==='candidate'?'초기 급등 전조 후보 (제한적 검증)':c.category==='watch'?'초기 움직임 관찰 · 검증 부족':'전조 제외 · 이미 상승 또는 조건 미충족';
+  const renderAssessment=c=>{
+   const label=c.category==='candidate'?'초기 급등 전조 후보 (제한적 검증)':c.category==='watch'?'관찰 전용 · 검증 부족':'전조 제외 · 조건 미충족';
    const details=c.f.map((x,i)=>featureNames[i]+': '+(i===7||i===8?(x*100).toFixed(1)+'%':i===4||i===5?x.toFixed(2)+'배':x.toFixed(2)+'%'));
    return '<article class="pattern-card"><div class="pattern-head"><b>'+esc(c.name)+' <small>'+esc(c.market)+'</small></b><span>'+label+'</span></div>'+
     '<p>현재 '+fmt(c.price,8)+'원 · 24시간 '+c.change.toFixed(2)+'% · 확정 15분봉 '+esc(c.date)+'</p>'+
-    '<p><b>판단: '+esc(c.reason)+'</b></p><p><b>과거 유사 구간 '+c.neighbors+'개 중 60분 내 +3% 발생 '+c.hits+'개 ('+percent(c.rate)+')</b> · 유사도 비교는 학습 데이터에서만 수행</p>'+
+    '<p><b>판단: '+esc(c.reason)+'</b></p><p>학습 구간 유사 사례 '+c.neighbors+'건 · 이후 60분 내 +3% '+c.hits+'건 ('+percent(c.rate)+')</p>'+
     '<ul>'+details.map(d=>'<li>'+esc(d)+'</li>').join('')+'</ul>'+
     '<button data-add-watch="'+esc(c.market)+'">☆ 관심 종목 등록</button></article>';
-  }).join(''):'<p>현재 평가 가능한 종목이 없습니다.</p>');
+  };
+  const excluded=assessments.filter(x=>x.category!=='candidate');
+  out.innerHTML=summary+(candidates.length?candidates.map(renderAssessment).join(''):'<article class="pattern-card"><b>현재 검증 기준을 통과한 초기 급등 전조 후보가 없습니다.</b><p>이미 급등한 종목과 검증이 부족한 종목은 후보 목록에서 제외했습니다. 조건을 임의로 낮춰 후보를 만들지 않습니다.</p></article>')+
+   (excluded.length?'<details><summary>관찰·제외 종목 '+excluded.length+'종 보기 (기본 숨김)</summary>'+excluded.map(renderAssessment).join('')+'</details>':'');
   progress.textContent='완료 · '+records.length+'종 과거 수집 · '+candidates.length+'종 급등 후보 · '+failed+'종 조회 실패 · '+new Date().toLocaleTimeString('ko-KR');
  }catch(e){out.textContent='분석 오류: '+e.message;progress.textContent='분석 실패'}
  finally{btn.disabled=false;scanBusy=false}
