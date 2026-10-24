@@ -247,6 +247,23 @@ function evaluateModel(train,test){
  return {total:eligible.length,events:eligible.filter(x=>x.event).length,
   selected,hits,baseline:testBase,trainBase,cutoff,precision:selected?hits/selected:0,trainEligible:training.length};
 }
+function radarAssessment(t,history){
+ const f=extractFeatures(history,history.length-1);
+ if(!f)return null;
+ const age=Date.now()-Date.parse(history.at(-1).candle_date_time_utc+'Z');
+ const change=t.signed_change_rate*100;
+ if(age>SCAN_MAX_STALE_MS||change>SCAN_MAX_24H_GAIN||change < -12||f[1]>4||f[2]>7||f[0]>2)return null;
+ // Transparent, heuristic ranking, not a learned probability or a buy recommendation.
+ const vol1=f[4],vol3=f[5];
+ const volumeScore=Math.min(40,Math.max(0,(vol1-1)*24))+Math.min(20,Math.max(0,(vol3-1)*14));
+ const trendScore=Math.max(0,16-Math.abs(f[1]-.6)*5);
+ const positionScore=Math.max(0,12-Math.abs(f[7]-.96)*100);
+ const closeScore=Math.max(0,12*f[8]);
+ const score=Math.round(volumeScore+trendScore+positionScore+closeScore);
+ if(vol1<1.15||vol3<.85||score<30)return null;
+ return {market:t.market,name:t.meta?.korean_name||t.market,price:t.trade_price,
+  change,f,score,vol1,vol3,date:history.at(-1).candle_date_time_kst};
+}
 function candidateAssessment(t,history,train,validation){
  const f=extractFeatures(history,history.length-1);
  if(!f)return null;
@@ -307,6 +324,7 @@ $('scanPatterns').onclick=async()=>{
   }
   const validation=evaluateModel(chronologicalTrain,chronologicalTest);
   const assessments=records.map(x=>candidateAssessment(x.t,x.history,chronologicalTrain,validation)).filter(Boolean);
+  const radar=records.map(x=>radarAssessment(x.t,x.history)).filter(Boolean).sort((a,b)=>b.score-a.score).slice(0,8);
   const order={candidate:0,watch:1,monitor:2,risk:3};
   assessments.sort((a,b)=>order[a.category]-order[b.category]||b.rate-a.rate);
   const candidates=assessments.filter(x=>x.category==='candidate');
@@ -327,10 +345,12 @@ $('scanPatterns').onclick=async()=>{
   const excluded=assessments.filter(x=>x.category!=='candidate');
   const diagnostics={noFeatures:records.length-assessments.length,pre:assessments.filter(x=>x.category!=='risk').length,watch:assessments.filter(x=>x.category==='watch').length};
   const observed=assessments.filter(x=>x.category==='watch').sort((a,b)=>b.rate-a.rate).slice(0,5);
-  out.innerHTML=summary+'<article class="pattern-card"><b>선별 단계 진단</b><p>현재 특징 계산 불가 '+diagnostics.noFeatures+'종 · 초기 조건 통과 '+diagnostics.pre+'종 · 유사 패턴 관찰 '+diagnostics.watch+'종 · 과거 검증 '+(validation.selected>=MIN_VALIDATION_SIGNALS?'신호 '+validation.selected+'건':'신호 부족')+'</p><p>후보 0개는 시장에 기회가 없다는 뜻이 아니라 현재 검증 기준에서 확증되지 않았다는 뜻입니다.</p></article>'+(candidates.length?candidates.map(renderAssessment).join(''):'<article class="pattern-card"><b>현재 검증 기준을 통과한 초기 급등 전조 후보가 없습니다.</b><p>검증에 실패한 신호를 성공한 것처럼 표시하지 않습니다. 아래 관찰 종목은 예측이 검증되지 않은 참고 자료입니다.</p></article>')+
+  const radarHTML='<section><h3>실시간 전조 관찰 · '+radar.length+'종 (검증된 매수 신호 아님)</h3>'+
+   (radar.length?radar.map(x=>'<article class="pattern-card"><div class="pattern-head"><b>'+esc(x.name)+' <small>'+esc(x.market)+'</small></b><span>관찰 점수 '+x.score+'/100</span></div><p>현재 '+fmt(x.price,8)+'원 · 24시간 '+x.change.toFixed(2)+'% · 확정 15분봉 '+esc(x.date)+'</p><p>최근 1시간 거래대금 '+x.vol1.toFixed(2)+'배 · 3시간 '+x.vol3.toFixed(2)+'배 · 1시간 가격 변화 '+x.f[0].toFixed(2)+'% · 3시간 '+x.f[1].toFixed(2)+'%</p><p>거래대금 증가와 가격 위치를 이용한 탐색용 점수입니다. 적중률이나 상승 확률이 아닙니다.</p><button data-add-watch="'+esc(x.market)+'">☆ 관심 종목 등록</button></article>').join(''):'<p>현재 설정한 거래대금 증가 기준을 충족하는 관찰 종목이 없습니다.</p>')+'</section>';
+  out.innerHTML=summary+radarHTML+'<article class="pattern-card"><b>선별 단계 진단</b><p>현재 특징 계산 불가 '+diagnostics.noFeatures+'종 · 초기 조건 통과 '+diagnostics.pre+'종 · 유사 패턴 관찰 '+diagnostics.watch+'종 · 과거 검증 '+(validation.selected>=MIN_VALIDATION_SIGNALS?'신호 '+validation.selected+'건':'신호 부족')+'</p><p>후보 0개는 시장에 기회가 없다는 뜻이 아니라 현재 검증 기준에서 확증되지 않았다는 뜻입니다.</p></article>'+(candidates.length?candidates.map(renderAssessment).join(''):'<article class="pattern-card"><b>현재 검증 기준을 통과한 초기 급등 전조 후보가 없습니다.</b><p>검증에 실패한 신호를 성공한 것처럼 표시하지 않습니다. 아래 관찰 종목은 예측이 검증되지 않은 참고 자료입니다.</p></article>')+
    (observed.length?'<section><h3>검증 미통과 · 초기 움직임 관찰 (매수 신호 아님)</h3>'+observed.map(renderAssessment).join('')+'</section>':'')+
    (excluded.length?'<details><summary>관찰·제외 종목 전체 '+excluded.length+'종 보기</summary>'+excluded.map(renderAssessment).join('')+'</details>':'');
-  progress.textContent='전체 '+screening.all+'종 시세 확인 · 정밀 '+records.length+'/'+targets.length+'종 완료 · '+candidates.length+'종 후보 · '+failed+'종 자료 부족/조회 실패 · '+new Date().toLocaleTimeString('ko-KR');
+  progress.textContent='전체 '+screening.all+'종 시세 확인 · 정밀 '+records.length+'/'+targets.length+'종 · 검증 후보 '+candidates.length+'종 · 전조 관찰 '+radar.length+'종 · 조회 실패 '+failed+'종 · '+new Date().toLocaleTimeString('ko-KR');
  }catch(e){out.textContent='분석 오류: '+e.message;progress.textContent='분석 실패'}
  finally{btn.disabled=false;scanBusy=false}
 };
