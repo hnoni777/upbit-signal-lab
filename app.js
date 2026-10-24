@@ -73,23 +73,47 @@ function checkAlerts(){
 $('coins').addEventListener('click',e=>{const b=e.target.closest('[data-market]');if(!b)return;const m=b.dataset.market;watch.has(m)?watch.delete(m):watch.add(m);localStorage.setItem('usl-watch',JSON.stringify([...watch]));render()});
 $('search').oninput=render;$('sort').onchange=render;$('refresh').onclick=load;
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-tab]').forEach(x=>x.classList.toggle('active',x===b));document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active',p.id===b.dataset.tab))});
+// Daily-candle research, with explicit out-of-sample time split.
 $('runBacktest').onclick=async()=>{
- const out=$('backtestResult');out.textContent='과거 60분봉 불러오는 중...';
+ const out=$('backtestResult'),btn=$('runBacktest');
+ btn.disabled=true;
+ out.textContent='최근 12개월 일봉 조회 중 (최대 2회 요청)...';
  try{
-  const market=$('backtestCoin').value,target=Number($('target').value),volumeMultiple=Number($('volumeMultiple').value);
-  let candles=await get('/candles/minutes/60?market='+encodeURIComponent(market)+'&count=200');candles.reverse();
-  let signals=0,hits=0,eligible=0,events=0;
-  for(let i=12;i<candles.length-6;i++){
-   const prev=candles.slice(i-6,i),prev12=candles.slice(i-12,i);
-   const volAvg=prev.reduce((s,c)=>s+c.candle_acc_trade_volume,0)/6;
-   const signal=candles[i].candle_acc_trade_volume>volAvg*volumeMultiple&&candles[i].trade_price>Math.max(...prev12.map(c=>c.trade_price));
-   const futureHigh=Math.max(...candles.slice(i+1,i+7).map(c=>c.high_price));
-   const hit=futureHigh>=candles[i].trade_price*(1+target);
-   eligible++;if(hit)events++;if(signal){signals++;if(hit)hits++}
+  const market=$('backtestCoin').value,target=Number($('target').value),multiple=Number($('volumeMultiple').value);
+  // Exclude the current unfinished KST trading day by paging from today's 00:00 KST.
+  const now=new Date(),todayKst=new Date(now.getTime()+9*3600000).toISOString().slice(0,10);
+  const cutoff=new Date(todayKst+'T00:00:00+09:00');
+  const first=await get('/candles/days?market='+encodeURIComponent(market)+'&count=200&to='+encodeURIComponent(cutoff.toISOString()));
+  if(!Array.isArray(first)||!first.length)throw Error('일봉 응답이 비어 있습니다.');
+  const oldest=first[first.length-1].candle_date_time_utc;
+  const second=await get('/candles/days?market='+encodeURIComponent(market)+'&count=200&to='+encodeURIComponent(oldest+'Z'));
+  if(!Array.isArray(second))throw Error('두 번째 일봉 응답이 올바르지 않습니다.');
+  const unique=new Map([...first,...second].map(c=>[c.candle_date_time_utc,c]));
+  let candles=[...unique.values()].filter(c=>new Date(c.candle_date_time_utc+'Z')<cutoff).sort((a,b)=>a.candle_date_time_utc.localeCompare(b.candle_date_time_utc));
+  const yearAgo=new Date(cutoff);yearAgo.setUTCDate(yearAgo.getUTCDate()-365);
+  candles=candles.filter(c=>new Date(c.candle_date_time_utc+'Z')>=yearAgo);
+  if(candles.length<80)throw Error('분석 가능한 일봉이 80개 미만입니다. 상장 기간 또는 중계 서버의 /candles/days 및 to 지원을 확인하세요.');
+  const trainEnd=Math.floor(candles.length*.7),lookback=20,horizon=7;
+  function measure(from,to){
+   let n=0,signals=0,hits=0,events=0;
+   for(let i=Math.max(lookback,from);i<Math.min(to,candles.length-horizon);i++){
+    const prev=candles.slice(i-lookback,i),recent=prev.slice(-7);
+    const avg=recent.reduce((s,c)=>s+c.candle_acc_trade_volume,0)/recent.length;
+    const signal=candles[i].candle_acc_trade_volume>avg*multiple&&candles[i].trade_price>Math.max(...prev.map(c=>c.trade_price));
+    const futureHigh=Math.max(...candles.slice(i+1,i+1+horizon).map(c=>c.high_price));
+    const event=futureHigh>=candles[i].trade_price*(1+target);
+    n++;if(event)events++;if(signal){signals++;if(event)hits++}
+   }
+   return {n,signals,hits,events};
   }
-  const pct=(a,b)=>b?((a/b)*100).toFixed(1)+'%':'해당 없음';
-  out.innerHTML='<b>'+esc(market)+' · '+candles.length+'개 60분봉 · 거래량 '+volumeMultiple+'배</b><p>평가 가능한 시점 '+eligible+'개 · 급등 사건 '+events+'개</p><p>탐지 신호 '+signals+'개 · 신호 적중 '+hits+'개</p><p>정밀도 '+pct(hits,signals)+' · 재현율 '+pct(hits,events)+' · 전체 급등 비율 '+pct(events,eligible)+'</p><p>주의: 중첩 시점과 단일 종목의 짧은 표본을 사용한 교육용 탐색 결과입니다. 독립적인 성과 검증이 아닙니다.</p>';
- }catch(e){out.textContent='검증 실패: '+e.message}
+  // Prevent train outcomes from looking into the holdout period.
+  const train=measure(lookback,trainEnd-horizon);
+  const test=measure(trainEnd,candles.length-horizon);
+  const pct=(a,b)=>b?((100*a/b).toFixed(1)+'%'):'표본 없음';
+  const block=(label,x)=>'<h3>'+label+'</h3><p>평가 '+x.n+'일 · 신호 '+x.signals+'건 · 적중 '+x.hits+'건 · 급등 사건 '+x.events+'건</p><p>정밀도 '+pct(x.hits,x.signals)+' · 재현율 '+pct(x.hits,x.events)+' · 무신호 포함 급등 빈도 '+pct(x.events,x.n)+'</p>';
+  out.innerHTML='<b>'+esc(market)+' · 일봉 '+candles.length+'개 · '+esc(candles[0].candle_date_time_kst.slice(0,10))+' ~ '+esc(candles[candles.length-1].candle_date_time_kst.slice(0,10))+'</b>'+block('탐색 구간 (앞 70%)',train)+block('시간순 별도 검증 (뒤 30%)',test)+'<p>거래량 '+multiple+'배 / 다음 7일 +'+(target*100).toFixed(0)+'% 기준. 일봉 종가 확정 뒤에야 신호가 확인됩니다. 검증 구간의 표본이 적으면 통계적으로 신뢰하기 어렵습니다.</p>';
+ }catch(e){out.textContent='12개월 검증 실패: '+e.message+' (중계 서버에 일봉·to 경로를 추가해야 할 수 있습니다.)'}
+ finally{btn.disabled=false}
 };
 load();setInterval(()=>{if(!document.hidden)load()},60000);
 if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
