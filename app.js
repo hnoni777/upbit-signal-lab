@@ -87,27 +87,51 @@ function patternFeatures(days,i){
  const notChasing=dayChange>=-2&&dayChange<=4;
  return {volume,compression,proximity,dayChange,volumeOK,compressed,nearHigh,notChasing,count:[volumeOK,compressed,nearHigh,notChasing].filter(Boolean).length};
 }
+function hourlyFeatures(c,i){
+ if(i<24)return null;
+ const prev=c.slice(i-24,i),recent=c.slice(i-6,i),now=c[i];
+ const base=prev.reduce((s,x)=>s+x.candle_acc_trade_price,0)/24;
+ const ratio=now.candle_acc_trade_price/Math.max(base,1);
+ const range6=(Math.max(...recent.map(x=>x.high_price))-Math.min(...recent.map(x=>x.low_price)))/Math.max(recent.at(-1).trade_price,1e-12);
+ const range24=(Math.max(...prev.map(x=>x.high_price))-Math.min(...prev.map(x=>x.low_price)))/Math.max(prev.at(-1).trade_price,1e-12);
+ const squeeze=range6/Math.max(range24,1e-12);
+ const near=now.trade_price/Math.max(...prev.map(x=>x.high_price));
+ const change=(now.trade_price/Math.max(prev.at(-1).trade_price,1e-12)-1)*100;
+ return {ratio,squeeze,near,change};
+}
 function patternEvidence(candles,ticker){
  if(!Array.isArray(candles)||candles.length<90)return null;
- const kstDate=new Date(Date.now()+9*3600000).toISOString().slice(0,10);
- const days=candles.filter(c=>c.candle_date_time_kst.slice(0,10)<kstDate).sort((a,b)=>a.candle_date_time_kst.localeCompare(b.candle_date_time_kst));
- if(days.length<85)return null;
- const f=patternFeatures(days,days.length-1);
- if(!f||!f.volumeOK||f.count<3||ticker.signed_change_rate>0.10)return null;
- const reasons=['전일 거래대금 '+f.volume.toFixed(2)+'배 (직전 20일 평균 대비)'];
- if(f.compressed)reasons.push('최근 5일 가격 범위 '+(f.compression*100).toFixed(0)+'% (이전 20일 대비)');
- if(f.nearHigh)reasons.push('20일 최고가 대비 종가 위치 '+(f.proximity*100).toFixed(1)+'%');
- if(f.notChasing)reasons.push('전일 등락 '+f.dayChange.toFixed(2)+'% (급등 추격 일부 제외)');
- // Compare the exact same rule against earlier historical days, without future leakage.
- let signals=0,hits=0,events=0,observations=0;
- for(let i=21;i<days.length-7;i++){
-  const h=patternFeatures(days,i);
-  if(!h)continue;
-  const event=Math.max(...days.slice(i+1,i+8).map(c=>c.high_price))>=days[i].trade_price*1.05;
-  observations++;if(event)events++;
-  if(h.volumeOK&&h.count>=3){signals++;if(event)hits++}
+ const hourNow=Math.floor(Date.now()/3600000)*3600000;
+ const c=candles.filter(x=>Date.parse(x.candle_date_time_utc+'Z')<hourNow).sort((a,b)=>a.candle_date_time_utc.localeCompare(b.candle_date_time_utc));
+ if(c.length<90)return null;
+ // Gaps mean the previous N observations are not necessarily N consecutive hours.
+ const f=hourlyFeatures(c,c.length-1);
+ if(!f)return null;
+ const volumeOK=f.ratio>=1.5&&f.ratio<=5;
+ const squeezeOK=f.squeeze<=0.7;
+ const nearOK=f.near>=0.95&&f.near<=1.015;
+ const calmOK=f.change>=-2&&f.change<=3;
+ const count=[volumeOK,squeezeOK,nearOK,calmOK].filter(Boolean).length;
+ if(!volumeOK||count<3||ticker.signed_change_rate>0.10)return null;
+ let cases=0,hits=0,baseEvents=0,evaluated=0;
+ // Exclude most recent 7 hours from history to avoid incomplete outcome labels.
+ for(let i=24;i<c.length-7;i++){
+  const x=hourlyFeatures(c,i);
+  if(!x)continue;
+  const future=c.slice(i+1,i+8);
+  // Ignore samples with missing hourly bars in the future window.
+  if(Date.parse(future.at(-1).candle_date_time_utc+'Z')-Date.parse(c[i].candle_date_time_utc+'Z')!==7*3600000)continue;
+  const event=Math.max(...future.map(z=>z.high_price))>=c[i].trade_price*1.05;
+  evaluated++;if(event)baseEvents++;
+  if(x.ratio>=1.5&&x.ratio<=5&&[true,x.squeeze<=0.7,x.near>=0.95&&x.near<=1.015,x.change>=-2&&x.change<=3].filter(Boolean).length>=3){
+   cases++;if(event)hits++;
+  }
  }
- return {market:ticker.market,name:ticker.meta?.korean_name||ticker.market,reasons,count:f.count,volRatio:f.volume,price:ticker.trade_price,change:ticker.signed_change_rate*100,date:days.at(-1).candle_date_time_kst.slice(0,10),history:{signals,hits,events,observations},days:days.length};
+ const reasons=['직전 확정 1시간봉 거래대금: 이전 24개 봉 평균의 '+f.ratio.toFixed(2)+'배'];
+ if(squeezeOK)reasons.push('직전 6개 봉 가격 범위: 24개 봉 범위의 '+(f.squeeze*100).toFixed(0)+'%');
+ if(nearOK)reasons.push('직전 확정봉 종가: 이전 24개 봉 최고가의 '+(f.near*100).toFixed(1)+'%');
+ if(calmOK)reasons.push('직전 확정 1시간봉 가격 변화: '+f.change.toFixed(2)+'%');
+ return {market:ticker.market,name:ticker.meta?.korean_name||ticker.market,reasons,count,price:ticker.trade_price,change:ticker.signed_change_rate*100,date:c.at(-1).candle_date_time_kst,history:{signals:cases,hits,events:baseEvents,observations:evaluated},days:c.length,volRatio:f.ratio};
 }
 
 $('scanPatterns').onclick=async()=>{
@@ -123,7 +147,7 @@ $('scanPatterns').onclick=async()=>{
   for(const t of targets){
    progress.textContent='분석 중 '+(++checked)+' / '+targets.length+' · '+t.market;
    try{
-    const days=await get('/candles/days?market='+encodeURIComponent(t.market)+'&count=200');
+    const days=await get('/candles/minutes/60?market='+encodeURIComponent(t.market)+'&count=200');
     const evidence=patternEvidence(days,t);
     if(evidence)found.push(evidence);
    }catch(e){failed++}
@@ -134,7 +158,7 @@ $('scanPatterns').onclick=async()=>{
   const pct=(a,b)=>b?(100*a/b).toFixed(1)+'%':'표본 부족';
   out.innerHTML=found.length?found.map(c=>{
    const h=c.history;
-   return '<article class="pattern-card"><div class="pattern-head"><b>'+esc(c.name)+' <small>'+esc(c.market)+'</small></b><span>'+c.count+'/4 조건 일치</span></div><p>현재 시세 '+fmt(c.price,8)+'원 · 24시간 '+c.change.toFixed(2)+'%</p><b>선정 근거 (확정 일봉 '+esc(c.date)+')</b><ul>'+c.reasons.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul><b>과거 동일 조건 비교 (최근 '+c.days+'개 일봉)</b><p>과거 신호 '+h.signals+'건 · 이후 7일 내 +5% 도달 '+h.hits+'건 · 관찰 적중률 '+pct(h.hits,h.signals)+' · 전체 일자 기본 급등률 '+pct(h.events,h.observations)+'</p><p>과거 표본은 규칙 설계에 사용된 기간과 겹치므로 독립 검증이 아닙니다. 미래 상승 확률로 해석하면 안 됩니다.</p><button data-add-watch="'+esc(c.market)+'">☆ 관심 종목 등록</button></article>';
+   return '<article class="pattern-card"><div class="pattern-head"><b>'+esc(c.name)+' <small>'+esc(c.market)+'</small></b><span>'+c.count+'/4 조건 일치</span></div><p>현재 시세 '+fmt(c.price,8)+'원 · 24시간 '+c.change.toFixed(2)+'%</p><b>선정 근거 (확정 1시간봉 '+esc(c.date)+')</b><ul>'+c.reasons.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul><b>과거 동일 조건 비교 (최근 '+c.days+'개 시간봉)</b><p>과거 신호 '+h.signals+'건 · 이후 7시간 내 +5% 도달 '+h.hits+'건 · 관찰 적중률 '+pct(h.hits,h.signals)+' · 전체 일자 기본 급등률 '+pct(h.events,h.observations)+'</p><p>최근 최대 200시간봉의 과거 사례 비교입니다. 규칙 설계와 표본이 겹치며 독립 검증이 아닙니다. 미래 상승 확률로 해석하면 안 됩니다.</p><button data-add-watch="'+esc(c.market)+'">☆ 관심 종목 등록</button></article>';
   }).join(''):'<p>현재 필수 거래대금 증가 조건을 포함한 전조 후보가 없습니다. 스테이블코인은 제외했습니다.</p>';
 
   progress.textContent='완료 · '+checked+'종 확인 · '+found.length+'종 후보 · '+failed+'종 조회 실패 · '+new Date().toLocaleTimeString('ko-KR');
