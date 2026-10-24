@@ -250,19 +250,33 @@ function evaluateModel(train,test){
 function radarAssessment(t,history){
  const f=extractFeatures(history,history.length-1);
  if(!f)return null;
- const age=Date.now()-Date.parse(history.at(-1).candle_date_time_utc+'Z');
- const change=t.signed_change_rate*100;
- if(age>SCAN_MAX_STALE_MS||change>SCAN_MAX_24H_GAIN||change < -12||f[1]>4||f[2]>7||f[0]>2)return null;
- // Transparent, heuristic ranking, not a learned probability or a buy recommendation.
+ const age=Date.now()-Date.parse(history.at(-1).candle_date_time_utc+'Z'),change=t.signed_change_rate*100;
+ if(age>SCAN_MAX_STALE_MS||change>SCAN_MAX_24H_GAIN||change< -12||f[1]>4||f[2]>7||f[0]>2)return null;
+ const recent=history.slice(-12),prior=history.slice(-36,-12);
+ if(recent.length!==12||prior.length!==24)return null;
+ const money=x=>Number(x.candle_acc_trade_price)||0;
+ const sum=a=>a.reduce((s,x)=>s+money(x),0);
+ const upMoney=sum(recent.filter(x=>x.trade_price>x.opening_price));
+ const downMoney=sum(recent.filter(x=>x.trade_price<x.opening_price));
+ const flatMoney=sum(recent.filter(x=>x.trade_price===x.opening_price));
+ const directionalShare=(upMoney+.5*flatMoney)/Math.max(sum(recent),1);
+ const upRatio=upMoney/Math.max(downMoney,1);
+ const last=recent.at(-1),previousHigh=Math.max(...recent.slice(0,-1).map(x=>x.high_price));
+ const breakoutAttempt=last.high_price>=previousHigh*.997;
+ const closeStrength=(last.trade_price-last.low_price)/Math.max(last.high_price-last.low_price,1e-12);
+ const volumeTrend=(sum(recent)/12)/Math.max(sum(prior)/24,1);
  const vol1=f[4],vol3=f[5];
- const volumeScore=Math.min(40,Math.max(0,(vol1-1)*24))+Math.min(20,Math.max(0,(vol3-1)*14));
- const trendScore=Math.max(0,16-Math.abs(f[1]-.6)*5);
- const positionScore=Math.max(0,12-Math.abs(f[7]-.96)*100);
- const closeScore=Math.max(0,12*f[8]);
- const score=Math.round(volumeScore+trendScore+positionScore+closeScore);
- if(vol1<1.15||vol3<.85||score<30)return null;
+ const volumeScore=Math.min(28,Math.max(0,(vol1-1)*17))+Math.min(14,Math.max(0,(vol3-1)*9));
+ const directionScore=Math.max(0,Math.min(25,(directionalShare-.4)*90));
+ const breakoutScore=breakoutAttempt?10:0;
+ const closeScore=Math.max(0,Math.min(10,closeStrength*10));
+ const trendScore=Math.max(0,Math.min(13,(volumeTrend-.8)*13));
+ const score=Math.min(100,Math.round(volumeScore+directionScore+breakoutScore+closeScore+trendScore));
+ if(vol1<1.15||vol3<.85||score<35)return null;
+ const pressure=directionalShare>=.58&&upRatio>=1.15?'양봉 거래대금 우세':directionalShare<.45?'음봉 거래대금 우세':'매수·매도 방향 혼재';
  return {market:t.market,name:t.meta?.korean_name||t.market,price:t.trade_price,
-  change,f,score,vol1,vol3,date:history.at(-1).candle_date_time_kst};
+  change,f,score,vol1,vol3,upRatio,directionalShare,volumeTrend,
+  breakoutAttempt,closeStrength,pressure,date:last.candle_date_time_kst};
 }
 function candidateAssessment(t,history,train,validation){
  const f=extractFeatures(history,history.length-1);
@@ -346,7 +360,7 @@ $('scanPatterns').onclick=async()=>{
   const diagnostics={noFeatures:records.length-assessments.length,pre:assessments.filter(x=>x.category!=='risk').length,watch:assessments.filter(x=>x.category==='watch').length};
   const observed=assessments.filter(x=>x.category==='watch').sort((a,b)=>b.rate-a.rate).slice(0,5);
   const radarHTML='<section><h3>실시간 전조 관찰 · '+radar.length+'종 (검증된 매수 신호 아님)</h3>'+
-   (radar.length?radar.map(x=>'<article class="pattern-card"><div class="pattern-head"><b>'+esc(x.name)+' <small>'+esc(x.market)+'</small></b><span>관찰 점수 '+x.score+'/100</span></div><p>현재 '+fmt(x.price,8)+'원 · 24시간 '+x.change.toFixed(2)+'% · 확정 15분봉 '+esc(x.date)+'</p><p>최근 1시간 거래대금 '+x.vol1.toFixed(2)+'배 · 3시간 '+x.vol3.toFixed(2)+'배 · 1시간 가격 변화 '+x.f[0].toFixed(2)+'% · 3시간 '+x.f[1].toFixed(2)+'%</p><p>거래대금 증가와 가격 위치를 이용한 탐색용 점수입니다. 적중률이나 상승 확률이 아닙니다.</p><button data-add-watch="'+esc(x.market)+'">☆ 관심 종목 등록</button></article>').join(''):'<p>현재 설정한 거래대금 증가 기준을 충족하는 관찰 종목이 없습니다.</p>')+'</section>';
+   (radar.length?radar.map(x=>'<article class="pattern-card"><div class="pattern-head"><b>'+esc(x.name)+' <small>'+esc(x.market)+'</small></b><span>관찰 점수 '+x.score+'/100</span></div><p>현재 '+fmt(x.price,8)+'원 · 24시간 '+x.change.toFixed(2)+'% · 확정 15분봉 '+esc(x.date)+'</p><p>최근 1시간 거래대금 '+x.vol1.toFixed(2)+'배 · 3시간 '+x.vol3.toFixed(2)+'배 · 1시간 가격 변화 '+x.f[0].toFixed(2)+'% · 3시간 '+x.f[1].toFixed(2)+'%</p><p>최근 3시간 양봉 거래대금 비중 '+(x.directionalShare*100).toFixed(1)+'% · 양봉/음봉 거래대금 '+x.upRatio.toFixed(2)+'배 · 거래대금 추세 '+x.volumeTrend.toFixed(2)+'배</p><p>봉 방향 판단: '+esc(x.pressure)+' · 직전 고점 돌파 시도 '+(x.breakoutAttempt?'있음':'없음')+' · 종가 위치 '+(x.closeStrength*100).toFixed(0)+'%</p><p>양봉·음봉 거래대금은 실제 체결 매수·매도량과 다릅니다. 관찰 점수는 상승 확률이나 매수 신호가 아닙니다.</p><button data-add-watch="'+esc(x.market)+'">☆ 관심 종목 등록</button></article>').join(''):'<p>현재 설정한 거래대금 증가 기준을 충족하는 관찰 종목이 없습니다.</p>')+'</section>';
   out.innerHTML=summary+radarHTML+'<article class="pattern-card"><b>선별 단계 진단</b><p>현재 특징 계산 불가 '+diagnostics.noFeatures+'종 · 초기 조건 통과 '+diagnostics.pre+'종 · 유사 패턴 관찰 '+diagnostics.watch+'종 · 과거 검증 '+(validation.selected>=MIN_VALIDATION_SIGNALS?'신호 '+validation.selected+'건':'신호 부족')+'</p><p>후보 0개는 시장에 기회가 없다는 뜻이 아니라 현재 검증 기준에서 확증되지 않았다는 뜻입니다.</p></article>'+(candidates.length?candidates.map(renderAssessment).join(''):'<article class="pattern-card"><b>현재 검증 기준을 통과한 초기 급등 전조 후보가 없습니다.</b><p>검증에 실패한 신호를 성공한 것처럼 표시하지 않습니다. 아래 관찰 종목은 예측이 검증되지 않은 참고 자료입니다.</p></article>')+
    (observed.length?'<section><h3>검증 미통과 · 초기 움직임 관찰 (매수 신호 아님)</h3>'+observed.map(renderAssessment).join('')+'</section>':'')+
    (excluded.length?'<details><summary>관찰·제외 종목 전체 '+excluded.length+'종 보기</summary>'+excluded.map(renderAssessment).join('')+'</details>':'');
