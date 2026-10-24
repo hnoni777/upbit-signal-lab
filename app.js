@@ -115,5 +115,67 @@ $('runBacktest').onclick=async()=>{
  }catch(e){out.textContent='12개월 검증 실패: '+e.message+' (중계 서버에 일봉·to 경로를 추가해야 할 수 있습니다.)'}
  finally{btn.disabled=false}
 };
+
+// Fixed four-market comparison. Uses the same definition as individual daily research.
+$('compareCoins').onclick=async()=>{
+ const btn=$('compareCoins'),out=$('comparisonResult');
+ btn.disabled=true;
+ const symbols=['KRW-BTC','KRW-SHIB','KRW-XRP','KRW-ETH'];
+ const target=Number($('target').value),multiple=Number($('volumeMultiple').value);
+ const now=new Date(),todayKst=new Date(now.getTime()+9*3600000).toISOString().slice(0,10);
+ const cutoff=new Date(todayKst+'T00:00:00+09:00');
+ const yearAgo=new Date(cutoff);yearAgo.setUTCDate(yearAgo.getUTCDate()-365);
+ const pct=(a,b)=>b?(100*a/b).toFixed(1)+'%':'—';
+ async function fetchYear(market){
+  const path='/candles/days?market='+encodeURIComponent(market)+'&count=200&to=';
+  const first=await get(path+encodeURIComponent(cutoff.toISOString()));
+  if(!Array.isArray(first)||!first.length)throw Error('일봉 없음');
+  const second=await get(path+encodeURIComponent(first[first.length-1].candle_date_time_utc+'Z'));
+  if(!Array.isArray(second))throw Error('추가 일봉 없음');
+  const unique=new Map([...first,...second].map(c=>[c.candle_date_time_utc,c]));
+  return [...unique.values()].filter(c=>{
+   const d=new Date(c.candle_date_time_utc+'Z');
+   return d>=yearAgo&&d<cutoff;
+  }).sort((a,b)=>a.candle_date_time_utc.localeCompare(b.candle_date_time_utc));
+ }
+ function evaluate(candles){
+  const lookback=20,horizon=7,split=Math.floor(candles.length*.7);
+  function section(from,to){
+   let days=0,signals=0,hits=0,events=0;
+   for(let i=Math.max(lookback,from);i<Math.min(to,candles.length-horizon);i++){
+    const prev=candles.slice(i-lookback,i);
+    const avg=prev.slice(-7).reduce((s,c)=>s+c.candle_acc_trade_volume,0)/7;
+    const signal=candles[i].candle_acc_trade_volume>avg*multiple&&candles[i].trade_price>Math.max(...prev.map(c=>c.trade_price));
+    const event=Math.max(...candles.slice(i+1,i+1+horizon).map(c=>c.high_price))>=candles[i].trade_price*(1+target);
+    days++;if(event)events++;if(signal){signals++;if(event)hits++}
+   }
+   return {days,signals,hits,events};
+  }
+  return {train:section(lookback,split-horizon),test:section(split,candles.length-horizon)};
+ }
+ try{
+  const results=[];
+  for(const symbol of symbols){
+   out.textContent='12개월 일봉 비교 분석 중... '+symbol+' ('+(results.length+1)+'/4)';
+   try{
+    const candles=await fetchYear(symbol);
+    if(candles.length<80)throw Error('일봉 80개 미만');
+    results.push({symbol,days:candles.length,...evaluate(candles)});
+   }catch(e){results.push({symbol,error:e.message})}
+  }
+  const rows=results.map(r=>{
+   if(r.error)return '<tr><td>'+esc(r.symbol)+'</td><td colspan="6">조회 실패: '+esc(r.error)+'</td></tr>';
+   const t=r.test;
+   return '<tr><td>'+esc(r.symbol)+'</td><td>'+r.days+'일</td><td>'+t.signals+'건</td><td>'+t.hits+'건</td><td>'+pct(t.hits,t.signals)+'</td><td>'+pct(t.hits,t.events)+'</td><td>'+pct(t.events,t.days)+'</td></tr>';
+  }).join('');
+  const totals=results.filter(r=>!r.error).reduce((a,r)=>{
+   for(const k of ['days','signals','hits','events'])a[k]+=r.test[k];
+   return a;
+  },{days:0,signals:0,hits:0,events:0});
+  out.innerHTML='<b>4종 비교 · 검증 구간(뒤 30%)</b><p>향후 7일 +'+(target*100).toFixed(0)+'% · 거래량 '+multiple+'배 · 코인별 12개월 자료</p><div class="tablewrap"><table><thead><tr><th>코인</th><th>일봉</th><th>신호</th><th>적중</th><th>정밀도</th><th>재현율</th><th>기본 급등률</th></tr></thead><tbody>'+rows+'</tbody></table></div><p>합산 신호 '+totals.signals+'건 · 적중 '+totals.hits+'건 · 정밀도 '+pct(totals.hits,totals.signals)+' · 기본 급등률 '+pct(totals.events,totals.days)+'</p><p>주의: 같은 날 여러 코인에서 신호가 발생할 수 있어 합산 건수는 독립 표본이 아닙니다. 조건을 비교 결과에 맞춰 조정하면 별도 검증의 의미가 약해집니다. 일봉 종가 확정 후 신호이며 실제 체결 수익률이 아닙니다.</p>';
+ }catch(e){out.textContent='비교 검증 실패: '+e.message}
+ finally{btn.disabled=false}
+};
+
 load();setInterval(()=>{if(!document.hidden)load()},60000);
 if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
