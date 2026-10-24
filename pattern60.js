@@ -157,6 +157,16 @@
  }
  function save(v){try{localStorage.setItem(CACHE_KEY,JSON.stringify(v))}catch(e){}}
  const note='급등 사례는 일봉 시가 대비 고가 +10% 이상인 날입니다. 그날 시가 대비 고가가 처음 +3%에 도달한 15분봉을 급등 시작의 대리 지표로 사용하며, 해당 봉 및 이후 데이터는 특징 계산에서 제외합니다. 1·3·6시간 전 패턴을 각각 비교합니다. 유사도는 상승 확률이 아닙니다.';
+ function classifyCurrent(f,change){
+  const [r1,r3,r6,r24,v1,v3,range,nearHigh,upShare]=f;
+  const risingVolume=v1>=1.15&&v3>=.85;
+  const improving=r1>=0&&r1>=r3/3&&upShare>=.52;
+  const stabilizing=r1>=-.4&&r3>=-2&&upShare>=.45&&nearHigh>=.90;
+  const chasing=r1>2||r3>4||r6>7||change>8;
+  if(!chasing&&risingVolume&&(improving||stabilizing)&&r6>=-5)return {kind:'recovery',label:'상승 전환 징후',why:improving?'단기 가격 회복·양봉 거래대금·거래대금 증가':'하락 둔화·고점 근접·거래대금 증가'};
+  if(r1<0&&r3<0&&(r1<r3/3||upShare<.45))return {kind:'decline',label:'하락세 지속',why:'1·3시간 가격 약세와 양봉 거래대금 비중 부족'};
+  return {kind:'neutral',label:'방향 미확인',why:chasing?'이미 단기 상승폭이 커 추격 위험':'상승 전환 조건과 하락 지속 조건 모두 불충족'};
+ }
  async function scan(){
   const btn=$('scanPatterns'),rebuild=$('rebuildPatterns'),out=$('patternCandidates'),progress=$('scanProgress');
   if(btn.disabled||rebuild.disabled)return;
@@ -184,16 +194,23 @@
      const ranked=db.examples.map(e=>({e,d:dist(f,e.f)})).sort((a,b)=>a.d-b.d);
      const nearest=ranked[0];
      // Show a ranking, not a fabricated minimum confidence threshold.
-     matches.push({t,f,nearest,similarity:Math.round(100/(1+nearest.d)),comparisons:ranked.length});
+     matches.push({t,f,nearest,trend:classifyCurrent(f,t.signed_change_rate*100),similarity:Math.round(100/(1+nearest.d)),comparisons:ranked.length});
     }catch(e){fail.push(t.market)}
     if(i%5===0)await sleep(160);
    }
    matches.sort((a,b)=>a.nearest.d-b.nearest.d);
-   const top=matches.slice(0,10);
-   $('candidates').textContent=String(top.length);
-   progress.textContent='저장된 과거 단계별 패턴 '+db.examples.length+'건 ('+new Date(db.at).toLocaleDateString('ko-KR')+') · 현재 비교 '+matches.length+'종 · 상위 '+top.length+'종';
-   out.innerHTML='<article class="pattern-card"><b>최근 365일 실제 급등 시작 1·3·6시간 전 패턴 유사도 TOP 10</b><p>'+escape(progress.textContent)+'</p><p>'+escape(note)+'</p><p>조사 대상은 거래대금 상위 최대 '+DAILY_LIMIT+'종, 현재 비교는 최대 '+CURRENT_LIMIT+'종입니다. 원화마켓 전체를 분석한 결과는 아닙니다. 과거 패턴 DB는 삭제하거나 직접 재수집하지 않는 한 계속 재사용합니다.</p></article>'+
-    (top.length?top.map((m,i)=>'<article class="pattern-card"><div class="pattern-head"><b>'+(i+1)+'. '+escape(m.t.meta?.korean_name||m.t.market)+' <small>'+escape(m.t.market)+'</small></b><span>형태 유사도 '+m.similarity+'/100</span></div><p>현재 '+Number(m.t.trade_price).toLocaleString('ko-KR',{maximumFractionDigits:8})+'원 · 24시간 '+(m.t.signed_change_rate*100).toFixed(2)+'%</p><p>가장 유사한 과거 사례: '+escape(m.nearest.e.name)+' ('+escape(m.nearest.e.market)+') · '+escape(m.nearest.e.date.slice(0,10))+' · 급등 시작 '+m.nearest.e.stageHours+'시간 전 · 시작 '+escape(m.nearest.e.onsetTime.slice(0,16).replace('T',' '))+' UTC · 당시 일봉 고가 +'+m.nearest.e.gain.toFixed(1)+'%</p><p>현재 1시간 '+m.f[0].toFixed(2)+'% · 3시간 '+m.f[1].toFixed(2)+'% · 1시간 거래대금 '+m.f[4].toFixed(2)+'배 · 3시간 거래대금 '+m.f[5].toFixed(2)+'배</p><p>이 사례와 비슷하다는 것은 향후 같은 상승폭을 뜻하지 않습니다.</p><button data-add-watch="'+escape(m.t.market)+'">☆ 관심 종목 등록</button></article>').join(''):'<p>현재 비교 가능한 연속 15분봉이 없습니다.</p>');
+   const recovery=matches.filter(m=>m.trend.kind==='recovery').slice(0,10);
+   const neutral=matches.filter(m=>m.trend.kind==='neutral').slice(0,10);
+   const decline=matches.filter(m=>m.trend.kind==='decline').slice(0,10);
+   $('candidates').textContent=String(recovery.length);
+   progress.textContent='저장된 과거 패턴 '+db.examples.length+'건 · 현재 '+matches.length+'종 비교 · 상승 전환 '+matches.filter(m=>m.trend.kind==='recovery').length+'종 · 방향 미확인 '+matches.filter(m=>m.trend.kind==='neutral').length+'종 · 하락 지속 '+matches.filter(m=>m.trend.kind==='decline').length+'종';
+   const card=(m,i)=>'<article class="pattern-card"><div class="pattern-head"><b>'+(i+1)+'. '+escape(m.t.meta?.korean_name||m.t.market)+' <small>'+escape(m.t.market)+'</small></b><span>유사도 '+m.similarity+'/100</span></div><p><b>'+escape(m.trend.label)+'</b> · '+escape(m.trend.why)+'</p><p>현재 '+Number(m.t.trade_price).toLocaleString('ko-KR',{maximumFractionDigits:8})+'원 · 24시간 '+(m.t.signed_change_rate*100).toFixed(2)+'%</p><p>과거 유사 사례: '+escape(m.nearest.e.name)+' · '+escape(m.nearest.e.date.slice(0,10))+' · 급등 시작 '+m.nearest.e.stageHours+'시간 전 · 당시 일봉 고가 +'+m.nearest.e.gain.toFixed(1)+'%</p><p>현재 1시간 '+m.f[0].toFixed(2)+'% · 3시간 '+m.f[1].toFixed(2)+'% · 1시간 거래대금 '+m.f[4].toFixed(2)+'배 · 3시간 거래대금 '+m.f[5].toFixed(2)+'배 · 최근 3시간 양봉 거래대금 '+(m.f[8]*100).toFixed(1)+'%</p><button data-add-watch="'+escape(m.t.market)+'">☆ 관심 종목 등록</button></article>';
+   const group=(title,items,empty)=>'<section><h3>'+title+' · '+items.length+'종 표시</h3>'+(items.length?items.map(card).join(''):'<p>'+empty+'</p>')+'</section>';
+   out.innerHTML='<article class="pattern-card"><b>1년 급등 전 패턴 유사도 + 현재 흐름 분류</b><p>'+escape(progress.textContent)+'</p><p>'+escape(note)+'</p><p>유사도 순으로 각 그룹 최대 10종을 표시합니다. 상승 전환은 거래대금과 가격 흐름의 관찰 분류이지 급등 예측이나 매수 신호가 아닙니다.</p></article>'+
+    group('상승 전환 징후',recovery,'현재 상승 전환 조건을 만족하는 종목이 없습니다.')+
+    group('방향 미확인',neutral,'방향 미확인 종목이 없습니다.')+
+    group('하락세 지속',decline,'하락세 지속으로 분류된 종목이 없습니다.');
+
   }catch(e){progress.textContent='유사도 분석 실패';out.textContent='분석 실패: '+e.message}
   finally{btn.disabled=false;rebuild.disabled=false}
  }
