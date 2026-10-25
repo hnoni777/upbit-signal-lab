@@ -1,5 +1,5 @@
 'use strict';
-/* v48: compressed pattern live matching (unvalidated) */
+/* v49: full KRW market scan with rate-limited candle requests */
 (()=>{
 const API='https://upbit-signal-proxy.parkdam6.workers.dev/v1',KEY='usl-24h-v43-dataset',LIMIT=35,EVENT_LIMIT=420,CONTROL_LIMIT=140,STEP=900000;
 const $=x=>document.getElementById(x),sleep=ms=>new Promise(r=>setTimeout(r,ms)),esc=x=>String(x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -120,18 +120,18 @@ async function rank(){
  const v=savedModel?.validation||{valid:false},patterns=archiveSamples;
  $('validation').textContent=savedModel?'전체 수집 '+savedModel.completedMarkets+'종목 · 대표 패턴 '+patterns.length+'개 · 시간순 검증 '+(v.valid?'통과':'미통과')+' · 비교 가능 시간대 '+v.groups+'개':'패턴 파일 불러오기 실패';
  if(!savedModel?.completed||patterns.length<10){$('results').innerHTML='<p>패턴 파일이 아직 준비되지 않았습니다.</p>';return}
- const selected=tickers.filter(t=>Number(t.acc_trade_price_24h)>1e8&&Number.isFinite(t.signed_change_rate)).sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h).slice(0,60);
+ const selected=tickers.filter(t=>Number.isFinite(t.signed_change_rate)&&Number(t.trade_price)>0).sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h);
  const rows=[];let errors=0;
  for(let i=0;i<selected.length;i++){
   const t=selected[i];$('progress').textContent='현재 코인 비교 '+(i+1)+'/'+selected.length+' · '+t.market;
   try{const f=await currentVector(t.market);if(!preSpike(f))continue;const p=matchPattern(f,patterns);if(p)rows.push({t,f,p})}catch(e){errors++}
-  if(i%5===0)await sleep(100);
+  await sleep(180);
  }
  rows.sort((a,b)=>b.p.similarity-a.p.similarity||b.p.margin-a.p.margin);
  $('compared').textContent=selected.length-errors;
  $('results').innerHTML='<p><strong>실험용 패턴 유사 종목</strong> · 과거 검증에서 예측 우위가 입증되지 않았습니다. 아래 결과는 관찰용이며 급등 확률·매수 신호가 아닙니다.</p>'+
  (rows.length?rows.slice(0,5).map((r,i)=>'<article class="item"><span class="score">상대 유사도 '+Math.round(r.p.similarity*100)+'/100</span><h3>'+(i+1)+'. '+esc(r.t.name)+' <small>'+esc(r.t.market)+'</small></h3><p>현재가 '+Number(r.t.trade_price).toLocaleString('ko-KR',{maximumFractionDigits:8})+'원 · 24시간 '+(r.t.signed_change_rate*100).toFixed(2)+'%</p><p>1시간 '+r.f[0].toFixed(2)+'% · 3시간 '+r.f[1].toFixed(2)+'% · 거래대금 변화 '+Math.expm1(r.f[4]).toFixed(2)+'배</p><p>가까운 급등 대표 패턴 '+r.p.nearest.p.count+'건 · 과거 그룹 평균 최고 상승폭 '+r.p.nearest.p.gain.toFixed(1)+'% (현재 예상치 아님)</p></article>').join(''):'<p>현재 기준을 만족하는 유사 종목이 없습니다. 억지로 5개를 채우지 않습니다.</p>');
- $('progress').textContent=archiveStatus+' · 현재 조사 '+selected.length+'종목 · 오류 '+errors+'종목 · 관찰 후보 '+rows.length+'종목';
+ $('progress').textContent=archiveStatus+' · 전체 원화마켓 '+selected.length+'종목 · 오류 '+errors+'종목 · 관찰 후보 '+rows.length+'종목';
 }
 async function run(train){if(busy)return;busy=true;for(const x of ['start','refresh','reset'])$(x).disabled=true;try{await marketData();await loadArchive();const d=read();$('scanned').textContent=archiveMarkets;$('samples').textContent=savedModel?.positives||0;$('negatives').textContent=savedModel?.negatives||0;await rank()}catch(e){$('progress').textContent='오류: '+e.message}finally{busy=false;for(const x of ['start','refresh','reset'])$(x).disabled=false}}
 $('start').onclick=()=>run(true);$('refresh').onclick=()=>run(false);
