@@ -1,9 +1,9 @@
 'use strict';
-/* v43: 24-hour 2-year learning */
+/* v44: incremental full-history 24h background backfill */
 (()=>{
 const API='https://upbit-signal-proxy.parkdam6.workers.dev/v1',KEY='usl-24h-v43-dataset',LIMIT=35,EVENT_LIMIT=420,CONTROL_LIMIT=140,STEP=900000;
 const $=x=>document.getElementById(x),sleep=ms=>new Promise(r=>setTimeout(r,ms)),esc=x=>String(x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let busy=false,markets=[],tickers=[];
+let busy=false,markets=[],tickers=[],archiveSamples=[],archiveStatus='백그라운드 수집 대기';
 async function get(path){for(let i=0;i<3;i++){const a=new AbortController(),tm=setTimeout(()=>a.abort(),20000);try{const r=await fetch(API+path,{signal:a.signal});if(!r.ok)throw Error('API '+r.status);const d=await r.json();if(!Array.isArray(d))throw Error('API 응답 오류');return d}catch(e){if(i===2)throw e;await sleep(600*(i+1))}finally{clearTimeout(tm)}}}
 const epoch=s=>Date.parse(s.endsWith('Z')?s:s+'Z');
 const order=a=>a.sort((x,y)=>epoch(x.candle_date_time_utc)-epoch(y.candle_date_time_utc));
@@ -97,16 +97,32 @@ async function learn(d){
  save(d);if(errors)$('progress').textContent='일부 조회 실패 '+errors+'건 · 재실행하면 재시도';
 }
 async function currentVector(market){const a=await get('/candles/minutes/15?market='+encodeURIComponent(market)+'&count=120');const limit=Math.floor(Date.now()/STEP)*STEP;return vector(order(a.filter(c=>epoch(c.candle_date_time_utc)<limit)))}
+async function loadArchive(){
+ try{
+  const response=await fetch('data/backfill-state.json?v='+Date.now(),{cache:'no-store'});
+  if(!response.ok){archiveStatus='전체 2년 수집 시작 대기 (GitHub Actions)';return}
+  const state=await response.json(),completed=Array.isArray(state.completed)?state.completed:[];
+  const combined=[];let fetched=0;
+  for(let i=0;i<completed.length;i+=6){
+   const batch=await Promise.all(completed.slice(i,i+6).map(async market=>{
+    try{const r=await fetch('data/'+market.replace('-','_')+'.json');if(!r.ok)return [];const data=await r.json();fetched++;return Array.isArray(data.samples)?data.samples:[]}catch(e){return []}
+   }));
+   for(const part of batch)combined.push(...part);
+  }
+  archiveSamples=combined;
+  archiveStatus='전체 시간대 연속 조사 '+fetched+'/'+markets.length+'종 · 표본 '+combined.length+'건 · 급등 '+combined.filter(x=>x.y).length+'건';
+ }catch(e){archiveStatus='백그라운드 데이터 로딩 오류: '+e.message}
+}
 async function rank(d){
- const v=validation(d),train=d.samples;if(train.filter(x=>x.y===1).length<10||train.filter(x=>x.y===0).length<20){$('results').innerHTML='<p>학습용 양성·음성 표본이 충분하지 않습니다. TOP 5를 생성하지 않습니다.</p>';return}
+ const active=archiveSamples.length>=40?{samples:archiveSamples}:d;const v=validation(active),train=active.samples;if(train.filter(x=>x.y===1).length<10||train.filter(x=>x.y===0).length<20){$('results').innerHTML='<p>학습용 양성·음성 표본이 충분하지 않습니다. TOP 5를 생성하지 않습니다.</p>';return}
  const selected=tickers.filter(t=>Number(t.acc_trade_price_24h)>1e8&&Number.isFinite(t.signed_change_rate)).sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h).slice(0,45);
  const rows=[];for(let i=0;i<selected.length;i++){const t=selected[i];$('progress').textContent='실시간 비교 '+(i+1)+'/'+selected.length+' · '+t.market;try{const f=await currentVector(t.market);if(!preSpike(f))continue;const p=classify(f,train);if(p)rows.push({t,f,p})}catch(e){}if(i%5===0)await sleep(100)}
  rows.sort((a,b)=>b.p.raw-a.p.raw);$('compared').textContent=rows.length;
  const inWindow=kstHour(Date.now())>='08:30'&&kstHour(Date.now())<'10:00';
- $('results').innerHTML='<p>'+'24시간 관찰 ·'+' 상승률 제한 없이 급등 전조·초기·가속 구간을 모두 비교합니다. 유사 사례 기반 상대 순위이며 검증된 상승 확률이 아닙니다. '+(v.valid?'시간순 검증 표본 기준 통과':'검증 표본이 부족하여 실험용 순위만 표시')+'</p>'+(rows.length<5?'<p>비교 가능한 종목 '+rows.length+'개. 억지로 5개를 채우지 않습니다.</p>':'')+rows.slice(0,5).map((r,i)=>'<article class="item"><span class="score">패턴 점수 '+Math.round(r.p.raw*100)+'/100</span><h3>'+(i+1)+'. '+esc(r.t.name)+' <small>'+esc(r.t.market)+'</small></h3><p>현재가 '+Number(r.t.trade_price).toLocaleString('ko-KR',{maximumFractionDigits:8})+'원 · 24시간 '+(r.t.signed_change_rate*100).toFixed(2)+'%</p><p>1시간 '+r.f[0].toFixed(2)+'% · 3시간 '+r.f[1].toFixed(2)+'% · 거래대금 변화 '+(Math.expm1(r.f[4])).toFixed(2)+'배</p><p>가장 가까운 과거 사례 '+esc(r.p.nearest.x.market)+' / '+esc(r.p.nearest.x.date)+' / 실제 최고 '+r.p.nearest.x.gain.toFixed(1)+'%'+(r.p.nearest.x.peakTime?' / 최고점 '+r.p.nearest.x.peakTime:'')+'</p></article>').join('');
+ $('results').innerHTML='<p>'+'24시간 관찰 · '+esc(archiveStatus)+' · '+' 상승률 제한 없이 급등 전조·초기·가속 구간을 모두 비교합니다. 유사 사례 기반 상대 순위이며 검증된 상승 확률이 아닙니다. '+(v.valid?'시간순 검증 표본 기준 통과':'검증 표본이 부족하여 실험용 순위만 표시')+'</p>'+(rows.length<5?'<p>비교 가능한 종목 '+rows.length+'개. 억지로 5개를 채우지 않습니다.</p>':'')+rows.slice(0,5).map((r,i)=>'<article class="item"><span class="score">패턴 점수 '+Math.round(r.p.raw*100)+'/100</span><h3>'+(i+1)+'. '+esc(r.t.name)+' <small>'+esc(r.t.market)+'</small></h3><p>현재가 '+Number(r.t.trade_price).toLocaleString('ko-KR',{maximumFractionDigits:8})+'원 · 24시간 '+(r.t.signed_change_rate*100).toFixed(2)+'%</p><p>1시간 '+r.f[0].toFixed(2)+'% · 3시간 '+r.f[1].toFixed(2)+'% · 거래대금 변화 '+(Math.expm1(r.f[4])).toFixed(2)+'배</p><p>가장 가까운 과거 사례 '+esc(r.p.nearest.x.market)+' / '+esc(r.p.nearest.x.date)+' / 실제 최고 '+r.p.nearest.x.gain.toFixed(1)+'%'+(r.p.nearest.x.peakTime?' / 최고점 '+r.p.nearest.x.peakTime:'')+'</p></article>').join('');
  $('progress').textContent='학습 '+d.samples.length+'건 · 성공 '+d.samples.filter(x=>x.y).length+'건 · 실패 '+d.samples.filter(x=>!x.y).length+'건 · 현재 비교 '+rows.length+'종';
 }
-async function run(train){if(busy)return;busy=true;for(const x of ['start','refresh','reset'])$(x).disabled=true;try{await marketData();const d=read();stats(d);if(train&&!d.completed)await learn(d);await rank(d)}catch(e){$('progress').textContent='오류: '+e.message}finally{busy=false;for(const x of ['start','refresh','reset'])$(x).disabled=false}}
+async function run(train){if(busy)return;busy=true;for(const x of ['start','refresh','reset'])$(x).disabled=true;try{await marketData();await loadArchive();const d=read();stats(d);if(archiveSamples.length){$('scanned').textContent=(archiveStatus.match(/조사 (\\d+)/)||[])[1]||d.done.length;$('samples').textContent=archiveSamples.filter(x=>x.y).length;$('negatives').textContent=archiveSamples.filter(x=>!x.y).length;}if(train&&!archiveSamples.length&&!d.completed)await learn(d);await rank(d)}catch(e){$('progress').textContent='오류: '+e.message}finally{busy=false;for(const x of ['start','refresh','reset'])$(x).disabled=false}}
 $('start').onclick=()=>run(true);$('refresh').onclick=()=>run(false);
 $('reset').onclick=()=>{if(!confirm('v43 24시간 학습 데이터만 삭제할까요? 기존 오전 데이터는 유지됩니다.'))return;localStorage.removeItem(KEY);stats(blank());$('validation').textContent='검증 대기';$('results').innerHTML='<p>학습 초기화 완료</p>'};
 const d=read();stats(d);if(d.samples.length)validation(d);$('status').textContent='실행 대기';
