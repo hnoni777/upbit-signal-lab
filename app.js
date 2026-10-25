@@ -30,8 +30,8 @@
  }
  const scale=[2,4,7,15,2,2,.06,.35];
  const distance=(a,b)=>Math.sqrt(a.reduce((s,x,i)=>s+Math.min(16,((x-b[i])/scale[i])**2),0)/a.length);
- const empty=()=>({version:1,done:[],events:[],examples:[],at:Date.now()});
- function read(){try{const d=JSON.parse(localStorage.getItem(KEY)||'null');return d?.version===1&&Array.isArray(d.done)&&Array.isArray(d.events)&&Array.isArray(d.examples)?d:empty()}catch(e){return empty()}}
+ const empty=()=>({version:1,done:[],events:[],examples:[],checked:[],complete:false,at:Date.now()});
+ function read(){try{const d=JSON.parse(localStorage.getItem(KEY)||'null');if(d?.version!==1||!Array.isArray(d.done)||!Array.isArray(d.events)||!Array.isArray(d.examples))return empty();if(!Array.isArray(d.checked))d.checked=d.examples.map(e=>e.market+'|'+e.day);return d}catch(e){return empty()}}
  function save(d){try{localStorage.setItem(KEY,JSON.stringify(d))}catch(e){$('progress').textContent='저장 공간 부족: 데이터 저장에 실패했습니다.'}}
  function stats(d){$('scanned').textContent=d.done.length;$('samples').textContent=d.examples.length}
  async function marketData(){
@@ -107,13 +107,13 @@
   unique.sort((a,b)=>b.day.localeCompare(a.day));const chosen=[],perCoin=new Map();for(const e of unique){const n=perCoin.get(e.market)||0;if(n>=4)continue;chosen.push(e);perCoin.set(e.market,n+1);if(chosen.length>=MAX_EVENTS)break}
   for(let i=0;i<chosen.length;i++){
    const e=chosen[i],id=e.market+'|'+e.day;
-   if(d.examples.some(x=>x.market+'|'+x.day===id))continue;
+   if(d.checked.includes(id))continue;
    $('progress').textContent='08~10시 급등 전조 확인 '+(i+1)+'/'+chosen.length+' · '+e.market+' · '+e.day;
-   try{const sample=extract(e,await eventBars(e.market,e.day));if(sample){d.examples.push(sample);save(d);stats(d)}}
+   try{const sample=extract(e,await eventBars(e.market,e.day));if(sample)d.examples.push(sample);d.checked.push(id);save(d);stats(d)}
    catch(err){$('progress').textContent='과거 분봉 조회 실패 '+e.market+': '+err.message}
    await sleep(150);
   }
-  save(d);
+  d.complete=d.done.length>=selected.length&&chosen.every(e=>d.checked.includes(e.market+'|'+e.day));save(d);
  }
  async function currentVector(market){
   const data=await get('/candles/minutes/15?market='+encodeURIComponent(market)+'&count=120');
@@ -140,7 +140,8 @@
  async function run(train){
   if(busy)return;busy=true;$('start').disabled=$('refresh').disabled=$('reset').disabled=true;
   try{await marketData();const d=read();stats(d);
-   if(train){const selected=tickers.filter(t=>Number(t.acc_trade_price_24h)>1e8).sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h).slice(0,MAX_MARKETS);await learn(d,selected)}
+   if(train&&!d.complete){const selected=tickers.filter(t=>Number(t.acc_trade_price_24h)>1e8).sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h).slice(0,MAX_MARKETS);await learn(d,selected)}
+   if(train&&d.complete)$('progress').textContent='저장된 2년 학습 데이터 재사용';
    await rank(d);
   }catch(e){$('progress').textContent='실행 실패: '+e.message}
   finally{busy=false;$('start').disabled=$('refresh').disabled=$('reset').disabled=false}
