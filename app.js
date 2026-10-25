@@ -1,5 +1,5 @@
 'use strict';
-/* v33 standalone 08-10 KST two-year historical event similarity. No fabricated odds. */
+/* v35 standalone 08-10 KST two-year historical event similarity. No fabricated odds. */
 (()=>{
  const API='https://upbit-signal-proxy.parkdam6.workers.dev/v1';
  const KEY='usl-morning-2y-v1',MAX_MARKETS=35,MAX_EVENTS=70,MAX_CURRENT=45;
