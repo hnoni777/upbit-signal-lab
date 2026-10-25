@@ -1,5 +1,5 @@
 'use strict';
-/* v41: fixed-time, leakage-safe positive/negative pattern learner + chronological holdout */
+/* v42: fixed-time, leakage-safe positive/negative pattern learner + chronological holdout */
 (()=>{
 const API='https://upbit-signal-proxy.parkdam6.workers.dev/v1',KEY='usl-morning-v36-dataset',LIMIT=35,EVENT_LIMIT=420,CONTROL_LIMIT=140,STEP=900000;
 const $=x=>document.getElementById(x),sleep=ms=>new Promise(r=>setTimeout(r,ms)),esc=x=>String(x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -63,10 +63,7 @@ function classify(f,train){
  return Number.isFinite(raw)?{raw,nearest,n:p.length+n.length}:null;
 }
 // Apply identical pre-spike gates to historical 08:30 inputs and live closed candles.
-function preSpike(f){
- if(!f||!f.every(Number.isFinite))return false;
- return f[0]<5&&f[1]<9&&f[2]<13&&f[0]>-8&&f[1]>-14&&f[6]<24;
-}
+function preSpike(f){return Array.isArray(f)&&f.every(Number.isFinite)}
 function validation(d){
  const {train,test,boundary}=split(d);
  const scored=test.filter(x=>preSpike(x.f)).map(x=>({x,p:classify(x.f,train)})).filter(x=>x.p);
@@ -126,11 +123,11 @@ async function learn(d){
 async function currentVector(market){const a=await get('/candles/minutes/15?market='+encodeURIComponent(market)+'&count=120');const limit=Math.floor(Date.now()/STEP)*STEP;return vector(order(a.filter(c=>epoch(c.candle_date_time_utc)<limit)))}
 async function rank(d){
  const v=validation(d),train=d.samples;if(train.filter(x=>x.y===1).length<10||train.filter(x=>x.y===0).length<20){$('results').innerHTML='<p>학습용 양성·음성 표본이 충분하지 않습니다. TOP 5를 생성하지 않습니다.</p>';return}
- const selected=tickers.filter(t=>Number(t.acc_trade_price_24h)>1e8&&t.signed_change_rate<.1&&t.signed_change_rate>-.15).sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h).slice(0,45);
+ const selected=tickers.filter(t=>Number(t.acc_trade_price_24h)>1e8&&Number.isFinite(t.signed_change_rate)).sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h).slice(0,45);
  const rows=[];for(let i=0;i<selected.length;i++){const t=selected[i];$('progress').textContent='실시간 비교 '+(i+1)+'/'+selected.length+' · '+t.market;try{const f=await currentVector(t.market);if(!preSpike(f))continue;const p=classify(f,train);if(p)rows.push({t,f,p})}catch(e){}if(i%5===0)await sleep(100)}
  rows.sort((a,b)=>b.p.raw-a.p.raw);$('compared').textContent=rows.length;
  const inWindow=kstHour(Date.now())>='08:30'&&kstHour(Date.now())<'10:00';
- $('results').innerHTML='<p>'+(inWindow?'오전 관찰 구간 ·':'관찰 시간대 밖 ·')+' 이미 급등한 종목(최근 1시간 +5%·3시간 +9% 이상 등)을 제외한 전조 후보입니다. 유사 사례 기반 상대 순위이며 검증된 상승 확률이 아닙니다. '+(v.valid?'시간순 검증 표본 기준 통과':'검증 표본이 부족하여 실험용 순위만 표시')+'</p>'+(rows.length<5?'<p>전조 조건을 통과한 종목 '+rows.length+'개. 억지로 5개를 채우지 않습니다.</p>':'')+rows.slice(0,5).map((r,i)=>'<article class="item"><span class="score">패턴 점수 '+Math.round(r.p.raw*100)+'/100</span><h3>'+(i+1)+'. '+esc(r.t.name)+' <small>'+esc(r.t.market)+'</small></h3><p>현재가 '+Number(r.t.trade_price).toLocaleString('ko-KR',{maximumFractionDigits:8})+'원 · 24시간 '+(r.t.signed_change_rate*100).toFixed(2)+'%</p><p>1시간 '+r.f[0].toFixed(2)+'% · 3시간 '+r.f[1].toFixed(2)+'% · 거래대금 변화 '+(Math.expm1(r.f[4])).toFixed(2)+'배</p><p>가장 가까운 과거 사례 '+esc(r.p.nearest.x.market)+' / '+esc(r.p.nearest.x.date)+' / 실제 최고 '+r.p.nearest.x.gain.toFixed(1)+'%'+(r.p.nearest.x.peakTime?' / 최고점 '+r.p.nearest.x.peakTime:'')+'</p></article>').join('');
+ $('results').innerHTML='<p>'+(inWindow?'오전 관찰 구간 ·':'관찰 시간대 밖 ·')+' 상승률 제한 없이 급등 전조·초기·가속 구간을 모두 비교합니다. 유사 사례 기반 상대 순위이며 검증된 상승 확률이 아닙니다. '+(v.valid?'시간순 검증 표본 기준 통과':'검증 표본이 부족하여 실험용 순위만 표시')+'</p>'+(rows.length<5?'<p>비교 가능한 종목 '+rows.length+'개. 억지로 5개를 채우지 않습니다.</p>':'')+rows.slice(0,5).map((r,i)=>'<article class="item"><span class="score">패턴 점수 '+Math.round(r.p.raw*100)+'/100</span><h3>'+(i+1)+'. '+esc(r.t.name)+' <small>'+esc(r.t.market)+'</small></h3><p>현재가 '+Number(r.t.trade_price).toLocaleString('ko-KR',{maximumFractionDigits:8})+'원 · 24시간 '+(r.t.signed_change_rate*100).toFixed(2)+'%</p><p>1시간 '+r.f[0].toFixed(2)+'% · 3시간 '+r.f[1].toFixed(2)+'% · 거래대금 변화 '+(Math.expm1(r.f[4])).toFixed(2)+'배</p><p>가장 가까운 과거 사례 '+esc(r.p.nearest.x.market)+' / '+esc(r.p.nearest.x.date)+' / 실제 최고 '+r.p.nearest.x.gain.toFixed(1)+'%'+(r.p.nearest.x.peakTime?' / 최고점 '+r.p.nearest.x.peakTime:'')+'</p></article>').join('');
  $('progress').textContent='학습 '+d.samples.length+'건 · 성공 '+d.samples.filter(x=>x.y).length+'건 · 실패 '+d.samples.filter(x=>!x.y).length+'건 · 현재 비교 '+rows.length+'종';
 }
 async function run(train){if(busy)return;busy=true;for(const x of ['start','refresh','reset'])$(x).disabled=true;try{await marketData();const d=read();stats(d);if(train&&!d.completed)await learn(d);await rank(d)}catch(e){$('progress').textContent='오류: '+e.message}finally{busy=false;for(const x of ['start','refresh','reset'])$(x).disabled=false}}
