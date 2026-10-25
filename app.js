@@ -1,5 +1,5 @@
 'use strict';
-/* v38: fixed-time, leakage-safe positive/negative pattern learner + chronological holdout */
+/* v39: fixed-time, leakage-safe positive/negative pattern learner + chronological holdout */
 (()=>{
 const API='https://upbit-signal-proxy.parkdam6.workers.dev/v1',KEY='usl-morning-v36-dataset',LIMIT=35,EVENT_LIMIT=420,CONTROL_LIMIT=140,STEP=900000;
 const $=x=>document.getElementById(x),sleep=ms=>new Promise(r=>setTimeout(r,ms)),esc=x=>String(x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -11,7 +11,7 @@ const dateKst=(ms)=>new Date(ms+32400000).toISOString().slice(0,10);
 const kstHour=(ms)=>new Date(ms+32400000).toISOString().slice(11,16);
 const dayUtc=(d,hh,mm)=>Date.parse(d+'T00:00:00Z')+(hh*60+mm-540)*60000;
 const blank=()=>({v:36,plan:37,done:[],candidates:[],checked:[],samples:[],completed:false,created:Date.now()});
-function read(){try{const x=JSON.parse(localStorage.getItem(KEY)||'null');if(x?.v!==36||!Array.isArray(x.samples)||!Array.isArray(x.done)||!Array.isArray(x.checked))return blank();if(x.plan!==37){x.plan=37;x.completed=false}return x}catch(e){return blank()}}
+function read(){try{const x=JSON.parse(localStorage.getItem(KEY)||'null');if(x?.v!==36||!Array.isArray(x.samples)||!Array.isArray(x.done)||!Array.isArray(x.checked))return blank();if(x.plan!==39){x.plan=39;x.completed=false;x.checked=x.checked.filter(id=>!x.samples.some(s=>s.market+'|'+s.date===id&&s.y===1&&!s.peakTime))}return x}catch(e){return blank()}}
 function save(d){try{localStorage.setItem(KEY,JSON.stringify(d));return true}catch(e){$('progress').textContent='저장 공간이 부족합니다. 학습 데이터 저장 실패';return false}}
 function stats(d){$('scanned').textContent=d.done.length;$('samples').textContent=d.samples.filter(x=>x.y===1).length;$('negatives').textContent=d.samples.filter(x=>x.y===0).length;$('compared').textContent='0'}
 function vector(rows){
@@ -43,7 +43,10 @@ function sample(market,name,date,a){
  if(future.length!==6||future.some((c,i)=>epoch(c.candle_date_time_utc)!==cutoff+i*STEP))return null;
  const entry=Number(prev.at(-1).trade_price),peak=Math.max(...future.map(c=>Number(c.high_price))),trough=Math.min(...future.map(c=>Number(c.low_price)));
  const gain=100*(peak/entry-1),drawdown=100*(trough/entry-1);
- return {market,name,date,f,y:gain>=10?1:0,gain,drawdown};
+ const peakCandle=future.find(c=>Number(c.high_price)===peak);
+ const startCandle=future.find(c=>Number(c.high_price)>=entry*1.03);
+ const rise=future.map(c=>({time:kstHour(epoch(c.candle_date_time_utc)),closePct:100*(Number(c.trade_price)/entry-1),highPct:100*(Number(c.high_price)/entry-1),turnover:Number(c.candle_acc_trade_price||0)}));
+ return {market,name,date,f,y:gain>=10?1:0,gain,drawdown,peakTime:kstHour(epoch(peakCandle.candle_date_time_utc)),onsetTime:startCandle?kstHour(epoch(startCandle.candle_date_time_utc)):null,rise};
 }
 function split(d){const a=d.samples.slice().sort((x,y)=>x.date.localeCompare(y.date));const dates=[...new Set(a.map(x=>x.date))];const boundary=dates[Math.floor(dates.length*.8)]||'9999';return {train:a.filter(x=>x.date<boundary),test:a.filter(x=>x.date>=boundary),boundary}}
 function classify(f,train){
@@ -89,7 +92,7 @@ async function learn(d){
  const controls=[];const dates=[...new Set(unique.map(x=>x.date))];for(let i=0;i<dates.length*2&&controls.length<CONTROL_LIMIT;i++){const m=chosen[(i*7)%chosen.length];if(!m)break;const e={market:m.market,name:m.name,date:dates[i%dates.length],kind:'control'};if(!positive.some(p=>p.market===e.market&&p.date===e.date))controls.push(e)}
  const all=[...positive,...controls];
  for(let i=0;i<all.length;i++){const e=all[i],id=e.market+'|'+e.date;if(d.checked.includes(id))continue;$('progress').textContent='08:30 기준 학습 '+(i+1)+'/'+all.length+' · '+e.market+' · '+e.date;
- try{const s=sample(e.market,e.name,e.date,await bars(e.market,e.date));if(s)d.samples.push(s);d.checked.push(id);save(d);stats(d)}catch(err){$('progress').textContent='분봉 오류 '+e.market+': '+err.message}await sleep(130)}
+ try{const s=sample(e.market,e.name,e.date,await bars(e.market,e.date));if(s){const old=d.samples.findIndex(x=>x.market===s.market&&x.date===s.date);if(old>=0)d.samples[old]=s;else d.samples.push(s)}d.checked.push(id);save(d);stats(d)}catch(err){$('progress').textContent='분봉 오류 '+e.market+': '+err.message}await sleep(130)}
  d.completed=chosen.every(t=>d.done.includes(t.market))&&all.every(e=>d.checked.includes(e.market+'|'+e.date));save(d);
 }
 async function currentVector(market){const a=await get('/candles/minutes/15?market='+encodeURIComponent(market)+'&count=120');const limit=Math.floor(Date.now()/STEP)*STEP;return vector(order(a.filter(c=>epoch(c.candle_date_time_utc)<limit)))}
