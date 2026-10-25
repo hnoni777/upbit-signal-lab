@@ -21,6 +21,8 @@ jobs:
         env:
           COINS_PER_RUN: '8'
         run: python scripts/backfill.py
+      - name: Build and save trained pattern model
+        run: python scripts/build_model.py
       - name: Commit completed historical samples
         run: |
           git config user.name "github-actions[bot]"
