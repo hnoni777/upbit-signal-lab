@@ -19,7 +19,7 @@ jobs:
           python-version: '3.12'
       - name: Incremental historical backfill
         env:
-          COINS_PER_RUN: '2'
+          COINS_PER_RUN: '8'
         run: python scripts/backfill.py
       - name: Commit completed historical samples
         run: |
