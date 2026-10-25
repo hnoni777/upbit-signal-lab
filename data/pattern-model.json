@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "status": "pending",
+  "builtAt": null,
+  "completedMarkets": 2,
+  "marketCount": 0,
+  "sampleCount": 0,
+  "positives": 0,
+  "negatives": 0,
+  "completed": false,
+  "validation": {
+    "valid": false,
+    "groups": 0,
+    "train": 0,
+    "test": 0,
+    "precision": null,
+    "baseline": null,
+    "boundary": null
+  },
+  "patterns": []
+}
