@@ -1,543 +1,152 @@
 'use strict';
-const API='https://upbit-signal-proxy.parkdam6.workers.dev/v1';
-let markets=[],tickers=[];
-let previousPrices=new Map(),alertsOn=false,lastAlertAt=new Map(),alertHistory=[];
-let loading=false;
-let watch=new Set(JSON.parse(localStorage.getItem('usl-watch')||'["KRW-SHIB"]'));
-const $=id=>document.getElementById(id);
-const fmt=(n,d=0)=>Number(n).toLocaleString('ko-KR',{maximumFractionDigits:d});
-const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-async function get(path){const r=await fetch(API+path,{headers:{accept:'application/json'}});if(!r.ok)throw Error('API HTTP '+r.status);return r.json()}
-function score(t){const change=t.signed_change_rate*100,vol=t.acc_trade_price_24h;return Math.min(100,Math.max(0,Math.round(25+change*3+Math.log10(Math.max(vol,1)/1e8)*12)))}
-async function load(){
- if(loading)return;
- loading=true;
- try{
-  $('status').textContent='업비트 연결 중';
-  if(!markets.length)markets=(await get('/market/all?isDetails=false')).filter(m=>m.market.startsWith('KRW-'));
-  const all=[];
-  for(let i=0;i<markets.length;i+=80){const batch=markets.slice(i,i+80);all.push(...await get('/ticker?markets='+encodeURIComponent(batch.map(m=>m.market).join(','))))}
-  tickers=all.map(t=>({...t,meta:markets.find(m=>m.market===t.market)}));
-  $('count').textContent=fmt(tickers.length);
-  $('updated').textContent=new Date().toLocaleTimeString('ko-KR');
-  $('status').textContent='시세 연결됨';render();checkAlerts();
- }catch(e){$('status').textContent='조회 실패';$('scanProgress').textContent='시세 조회 실패: '+e.message}
- finally{loading=false}
-}
-function render(){
- $('watchlist').innerHTML=[...watch].map(m=>{const t=tickers.find(x=>x.market===m);return '<div class="watchitem"><span>'+esc(t?.meta?.korean_name||m)+' ('+esc(m)+')</span><span>'+(t?fmt(t.trade_price,8)+'원':'시세 대기')+'</span></div>'}).join('')||'<p>관심 종목이 없습니다.</p>';
- const shib=tickers.find(t=>t.market==='KRW-SHIB');
- $('shibStatus').textContent=shib?'현재 '+fmt(shib.trade_price,8)+'원 · '+(shib.trade_price>=0.00727?'본전 기준 이상':'본전 기준 미만')+' (수수료 제외)':'시바이누 시세 없음';
-}
-
-// Browser-only watchlist alerts: no push subscription or background service.
-const threshold=$('alertThreshold');
-threshold.value=localStorage.getItem('usl-alert-threshold')||'2';
-threshold.onchange=()=>localStorage.setItem('usl-alert-threshold',threshold.value);
-$('enableAlerts').onclick=async()=>{
- if(alertsOn){alertsOn=false;$('enableAlerts').textContent='알림 켜기';$('alertState').textContent='알림 꺼짐';return}
- alertsOn=true;
- if('Notification' in window && Notification.permission==='default'){
-  try{await Notification.requestPermission()}catch(e){}
- }
- $('enableAlerts').textContent='알림 끄기';
- $('alertState').textContent=('Notification' in window && Notification.permission==='granted')?'화면 알림 + 브라우저 알림 활성':'화면 알림 활성 (브라우저 알림 권한 없음)';
-};
-function checkAlerts(){
- const now=Date.now(),limit=Number(threshold.value);
- for(const t of tickers){
-  const old=previousPrices.get(t.market);
-  if(alertsOn&&watch.has(t.market)&&old>0){
-   const delta=(t.trade_price/old-1)*100;
-   if(delta>=limit&&now-(lastAlertAt.get(t.market)||0)>10*60*1000){
-    lastAlertAt.set(t.market,now);
-    const name=t.meta?.korean_name||t.market;
-    const msg=name+' '+delta.toFixed(2)+'% 상승 (직전 조회 대비)';
-    alertHistory.unshift({msg,time:new Date(now).toLocaleTimeString('ko-KR')});
-    alertHistory=alertHistory.slice(0,15);
-    $('alertLog').innerHTML=alertHistory.map(a=>'<div class="alertentry">'+esc(a.time+' · '+a.msg)+'</div>').join('');
-    if('Notification' in window&&Notification.permission==='granted'){
-     try{new Notification('UPBIT SIGNAL LAB',{body:msg,tag:'usl-'+t.market})}catch(e){}
-    }
-   }
-  }
-  previousPrices.set(t.market,t.trade_price);
- }
-}
-
-$('refresh').onclick=load;
-document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-tab]').forEach(x=>x.classList.toggle('active',x===b));document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active',p.id===b.dataset.tab))});
-
-let scanBusy=false;
-const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-const STABLE_SYMBOLS=new Set(['USDT','USDC','DAI','TUSD','USDD','FDUSD','USDP','PYUSD','EURC','BUSD','USD1','RLUSD']);
-function patternFeatures(days,i){
- if(i<21)return null;
- const last=days[i],prev=days.slice(i-20,i),recent=days.slice(i-5,i);
- const avg=prev.reduce((s,c)=>s+c.candle_acc_trade_price,0)/20;
- const volume=last.candle_acc_trade_price/Math.max(avg,1);
- const range20=(Math.max(...prev.map(c=>c.high_price))-Math.min(...prev.map(c=>c.low_price)))/Math.max(prev.at(-1).trade_price,1e-12);
- const range5=(Math.max(...recent.map(c=>c.high_price))-Math.min(...recent.map(c=>c.low_price)))/Math.max(recent.at(-1).trade_price,1e-12);
- const compression=range5/Math.max(range20,1e-9);
- const proximity=last.trade_price/Math.max(...prev.map(c=>c.high_price));
- const dayChange=(last.trade_price/Math.max(last.prev_closing_price,1e-12)-1)*100;
- const volumeOK=volume>=1.5&&volume<=5;
- const compressed=compression<=0.65;
- const nearHigh=proximity>=0.95&&proximity<=1.015;
- const notChasing=dayChange>=-2&&dayChange<=4;
- return {volume,compression,proximity,dayChange,volumeOK,compressed,nearHigh,notChasing,count:[volumeOK,compressed,nearHigh,notChasing].filter(Boolean).length};
-}
-
-/* Historical precursor research: 15-minute candles, chronological train/holdout,
-   actual +3% / 60-minute events, non-event controls, and nearest-pattern comparison.
-   Results are descriptive, never probabilities of future returns. */
-const HIST_INTERVAL=15,HIST_PAGES=7,HIST_TARGETS=36,HORIZON=4,TARGET_GAIN=.03;
-const MIN_DAILY_KRW=100000000;
-const SCAN_MAX_24H_GAIN=8, SCAN_MAX_STALE_MS=45*60000;
-const MIN_NEIGHBORS=25, MIN_VALIDATION_SIGNALS=8;
-const featureNames=['1시간 수익률','3시간 수익률','6시간 수익률','24시간 수익률','1시간 거래대금 배수','3시간 거래대금 배수','6시간 변동폭','24시간 고점 근접도','종가 위치'];
-function pctReturn(a,b){return 100*(a/Math.max(b,1e-12)-1)}
-function extractFeatures(c,i){
- if(i<96)return null;
- // Upbit can omit candles for no-trade intervals: do not treat gaps as 15-minute bars.
- if(Date.parse(c[i].candle_date_time_utc+'Z')-Date.parse(c[i-96].candle_date_time_utc+'Z')!==96*HIST_INTERVAL*60000)return null;
- const cur=c[i],p=c.slice(i-96,i);
- const average=(xs)=>xs.reduce((s,x)=>s+x.candle_acc_trade_price,0)/Math.max(xs.length,1);
- const range=(xs)=>(Math.max(...xs.map(x=>x.high_price))-Math.min(...xs.map(x=>x.low_price)))/Math.max(cur.trade_price,1e-12)*100;
- const v1=average(p.slice(-4))/Math.max(average(p.slice(-96)),1);
- const v3=average(p.slice(-12))/Math.max(average(p.slice(-96)),1);
- const vals=[
-  pctReturn(cur.trade_price,c[i-4].trade_price),
-  pctReturn(cur.trade_price,c[i-12].trade_price),
-  pctReturn(cur.trade_price,c[i-24].trade_price),
-  pctReturn(cur.trade_price,c[i-96].trade_price),
-  v1,v3,range(p.slice(-24)),cur.trade_price/Math.max(...p.map(x=>x.high_price)),
-  (cur.trade_price-cur.low_price)/Math.max(cur.high_price-cur.low_price,1e-12)
- ];
- if(vals.some(x=>!Number.isFinite(x)))return null;
- return vals;
-}
-const scales=[2,4,7,15,2,2,5,.06,.5];
-function distance(a,b){return a.reduce((s,v,j)=>s+Math.min(16,Math.pow((v-b[j])/scales[j],2)),0)/a.length}
-function neighbors(v,samples,k=MIN_NEIGHBORS,excludeMarket=''){
- // Exclude the same market where possible, to avoid merely memorizing its own regime.
- const pool=excludeMarket?samples.filter(x=>x.market!==excludeMarket):samples;
- return pool.map(x=>({d:distance(v,x.f),event:x.event})).sort((a,b)=>a.d-b.d).slice(0,k);
-}
-function outcome(c,i){
- if(i+HORIZON>=c.length)return null;
- const start=Date.parse(c[i].candle_date_time_utc+'Z'),finish=Date.parse(c[i+HORIZON].candle_date_time_utc+'Z');
- if(finish-start!==HORIZON*HIST_INTERVAL*60000)return null;
- return Math.max(...c.slice(i+1,i+HORIZON+1).map(x=>x.high_price))>=c[i].trade_price*(1+TARGET_GAIN);
-}
-
-// Cached history avoids downloading hundreds of candles again on each scan.
-// IndexedDB is optional: private browsing / blocked storage falls back to in-memory cache.
-const historyMemory=new Map();
-let historyDBPromise;
-function historyDB(){
- if(!('indexedDB' in window))return Promise.resolve(null);
- if(!historyDBPromise)historyDBPromise=new Promise(resolve=>{
-  try{
-   const req=indexedDB.open('usl-history-v1',1);
-   req.onupgradeneeded=()=>req.result.createObjectStore('candles');
-   req.onsuccess=()=>resolve(req.result);
-   req.onerror=()=>resolve(null);
-   req.onblocked=()=>resolve(null);
-  }catch(e){resolve(null)}
- });
- return historyDBPromise;
-}
-async function cachedHistory(market){
- const mem=historyMemory.get(market);
- // A completed 15-minute candle must be fresh enough for the present scan.
- if(mem&&Date.now()-mem.at<5*60000)return mem.candles;
- const db=await historyDB();
- if(!db)return null;
- return new Promise(resolve=>{
-  try{
-   const tx=db.transaction('candles','readonly');
-   const req=tx.objectStore('candles').get(market);
-   req.onsuccess=()=>{
-    const entry=req.result;
-    if(entry&&Date.now()-entry.at<5*60000){
-     historyMemory.set(market,entry);resolve(entry.candles)
-    }else resolve(null);
-   };
-   req.onerror=()=>resolve(null);
-  }catch(e){resolve(null)}
- });
-}
-async function saveHistory(market,candles){
- const entry={at:Date.now(),candles};
- historyMemory.set(market,entry);
- const db=await historyDB();
- if(!db)return;
- try{const tx=db.transaction('candles','readwrite');tx.objectStore('candles').put(entry,market)}catch(e){}
-}
-function selectScanTargets(all){
- const eligible=all.filter(t=>t.market.startsWith('KRW-')&&!STABLE_SYMBOLS.has(t.market.slice(4))&&
-  Number.isFinite(t.acc_trade_price_24h)&&t.acc_trade_price_24h>=MIN_DAILY_KRW&&
-  Number.isFinite(t.signed_change_rate)&&t.signed_change_rate*100<=SCAN_MAX_24H_GAIN&&
-  t.signed_change_rate*100>=-12);
- // Separate high-liquidity and emerging-liquidity groups: do not scan only the top-volume coins.
- const sorted=[...eligible].sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h);
- const high=sorted.slice(0,18);
- const emerging=sorted.slice(18).filter(t=>t.acc_trade_price_24h>=MIN_DAILY_KRW)
-  .sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h)
-  .slice(0,HIST_TARGETS-high.length);
- return {targets:[...high,...emerging],eligible:eligible.length,all:all.filter(t=>t.market.startsWith('KRW-')).length};
-}
-
-async function fetchHistory(market,progress){
- const cached=await cachedHistory(market);
- if(cached){progress(0,0);return cached}
- const seen=new Map();let to='';
- for(let page=0;page<HIST_PAGES;page++){
-  progress(page+1,HIST_PAGES);
-  const path='/candles/minutes/15?market='+encodeURIComponent(market)+'&count=200'+(to?'&to='+encodeURIComponent(to):'');
-  let batch;
-  for(let attempt=0;attempt<3;attempt++){
-   try{batch=await get(path);break}catch(e){if(attempt===2)throw e;await pause(600*(attempt+1))}
-  }
-  if(!Array.isArray(batch)||!batch.length)break;
-  for(const x of batch)seen.set(x.candle_date_time_utc,x);
-  const oldest=batch.at(-1).candle_date_time_utc;
-  if(batch.length<200||oldest+'Z'===to)break;
-  // The API 'to' cursor is exclusive; keep it in UTC.
-  to=oldest+'Z';
-  await pause(125);
- }
- const now=Math.floor(Date.now()/(HIST_INTERVAL*60000))*HIST_INTERVAL*60000;
- const candles=[...seen.values()].filter(x=>Date.parse(x.candle_date_time_utc+'Z')<now).sort((a,b)=>a.candle_date_time_utc.localeCompare(b.candle_date_time_utc));
- if(candles.length>=200)await saveHistory(market,candles);
- return candles;
-}
-function historicalSamples(c){
- const train=[],test=[];
- for(let i=96;i<c.length-HORIZON;i+=4){
-  const f=extractFeatures(c,i),event=outcome(c,i);
-  if(!f||event===null)continue;
-  const sample={f,event,market:c[i].market,ts:Date.parse(c[i].candle_date_time_utc+'Z')};
-  train.push(sample);
- }
- return {train,test};
-}
-function earlyStage(f){
- // Broad pre-breakout eligibility; a later independent holdout decides whether signals are trustworthy.
- // Hard exclusions prevent chasing coins already in a major move.
- return f[0]>=-2&&f[0]<=2&&f[1]>=-4&&f[1]<=4&&f[2]>=-7&&f[2]<=7&&
-  f[3]>=-12&&f[3]<=8&&f[4]>=.65&&f[5]>=.60&&f[6]<=16&&
-  f[7]>=.65&&f[7]<=1.025&&f[8]>=.35;
-}
-function evaluateModel(train,test){
- const training=train.filter(x=>earlyStage(x.f));
- const eligible=test.filter(x=>earlyStage(x.f));
- const trainBase=training.length?training.filter(x=>x.event).length/training.length:0;
- const testBase=eligible.length?eligible.filter(x=>x.event).length/eligible.length:0;
- let selected=0,hits=0;
- // Fixed before holdout evaluation. Never tune against test labels.
- const cutoff=Math.max(.20,trainBase*1.35);
- for(const x of eligible){
-  const n=neighbors(x.f,training,MIN_NEIGHBORS,x.market);
-  if(n.length<MIN_NEIGHBORS)continue;
-  const rate=n.filter(y=>y.event).length/n.length;
-  if(rate>=cutoff){selected++;if(x.event)hits++}
- }
- return {total:eligible.length,events:eligible.filter(x=>x.event).length,
-  selected,hits,baseline:testBase,trainBase,cutoff,precision:selected?hits/selected:0,trainEligible:training.length};
-}
-function radarAssessment(t,history){
- const f=extractFeatures(history,history.length-1);
- if(!f)return null;
- const age=Date.now()-Date.parse(history.at(-1).candle_date_time_utc+'Z'),change=t.signed_change_rate*100;
- if(age>SCAN_MAX_STALE_MS||change>SCAN_MAX_24H_GAIN||change< -12||f[1]>4||f[2]>7||f[0]>2)return null;
- const recent=history.slice(-12),prior=history.slice(-36,-12);
- if(recent.length!==12||prior.length!==24)return null;
- const money=x=>Number(x.candle_acc_trade_price)||0;
- const sum=a=>a.reduce((s,x)=>s+money(x),0);
- const upMoney=sum(recent.filter(x=>x.trade_price>x.opening_price));
- const downMoney=sum(recent.filter(x=>x.trade_price<x.opening_price));
- const flatMoney=sum(recent.filter(x=>x.trade_price===x.opening_price));
- const directionalShare=(upMoney+.5*flatMoney)/Math.max(sum(recent),1);
- const upRatio=upMoney/Math.max(downMoney,1);
- const last=recent.at(-1),previousHigh=Math.max(...recent.slice(0,-1).map(x=>x.high_price));
- const breakoutAttempt=last.high_price>=previousHigh*.997;
- const closeStrength=(last.trade_price-last.low_price)/Math.max(last.high_price-last.low_price,1e-12);
- const volumeTrend=(sum(recent)/12)/Math.max(sum(prior)/24,1);
- const vol1=f[4],vol3=f[5];
- const volumeScore=Math.min(28,Math.max(0,(vol1-1)*17))+Math.min(14,Math.max(0,(vol3-1)*9));
- const directionScore=Math.max(0,Math.min(25,(directionalShare-.4)*90));
- const breakoutScore=breakoutAttempt?10:0;
- const closeScore=Math.max(0,Math.min(10,closeStrength*10));
- const trendScore=Math.max(0,Math.min(13,(volumeTrend-.8)*13));
- const score=Math.min(100,Math.round(volumeScore+directionScore+breakoutScore+closeScore+trendScore));
- if(vol1<1.15||vol3<.85||score<35)return null;
- const pressure=directionalShare>=.58&&upRatio>=1.15?'양봉 거래대금 우세':directionalShare<.45?'음봉 거래대금 우세':'매수·매도 방향 혼재';
- return {market:t.market,name:t.meta?.korean_name||t.market,price:t.trade_price,
-  change,f,score,vol1,vol3,upRatio,directionalShare,volumeTrend,
-  breakoutAttempt,closeStrength,pressure,date:last.candle_date_time_kst};
-}
-async function tradeExecution(market){
- const path='/trades/ticks?market='+encodeURIComponent(market)+'&count=200';
- let ticks=null,source='',failures=[];
- for(const [name,url] of [['중계 서버',API+path],['업비트 직접','https://api.upbit.com/v1'+path]]){
-  try{
-   const controller=new AbortController();
-   const timer=setTimeout(()=>controller.abort(),6500);
-   let response;
-   try{response=await fetch(url,{headers:{accept:'application/json'},signal:controller.signal})}
+/* v33 standalone 08-10 KST two-year historical event similarity. No fabricated odds. */
+(()=>{
+ const API='https://upbit-signal-proxy.parkdam6.workers.dev/v1';
+ const KEY='usl-morning-2y-v1',MAX_MARKETS=35,MAX_EVENTS=70,MAX_CURRENT=45;
+ const $=id=>document.getElementById(id),sleep=ms=>new Promise(r=>setTimeout(r,ms));
+ const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ const nowKst=()=>new Date(Date.now()+9*3600000).toISOString().slice(11,16);
+ let busy=false,markets=[],tickers=[];
+ async function get(path){
+  for(let n=0;n<3;n++){
+   const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),18000);
+   try{const r=await fetch(API+path,{signal:ctl.signal});if(!r.ok)throw Error('HTTP '+r.status);const data=await r.json();if(!Array.isArray(data))throw Error('잘못된 응답');return data}
+   catch(e){if(n===2)throw e;await sleep(700*(n+1))}
    finally{clearTimeout(timer)}
-   if(!response.ok)throw Error('HTTP '+response.status);
-   const data=await response.json();
-   if(!Array.isArray(data))throw Error('체결 배열 아님');
-   ticks=data;source=name;break;
-  }catch(e){failures.push(name+': '+String(e.message||e).slice(0,65))}
+  }
  }
- if(!ticks)return {status:'unavailable',reason:'체결 API 연결 실패 ('+failures.join('; ')+')'};
- if(!ticks.length)return {status:'insufficient',reason:'체결 내역 없음'};
- const normalized=ticks.map(x=>({
-  timestamp:Number(x.timestamp)||Date.parse(x.trade_date_utc+'T'+x.trade_time_utc+'Z'),
-  side:x.ask_bid,amount:Number(x.trade_price)*Number(x.trade_volume)
- })).filter(x=>Number.isFinite(x.timestamp)&&Number.isFinite(x.amount)&&x.amount>0);
- if(!normalized.length)return {status:'insufficient',reason:'유효 체결 데이터 없음'};
- const newest=Math.max(...normalized.map(x=>x.timestamp));
- if(Date.now()-newest>180000)return {status:'stale',reason:'마지막 체결이 3분 이상 이전',source};
- const window=normalized.filter(x=>newest-x.timestamp>=0&&newest-x.timestamp<=300000);
- const buy=window.filter(x=>x.side==='BID').reduce((s,x)=>s+x.amount,0);
- const sell=window.filter(x=>x.side==='ASK').reduce((s,x)=>s+x.amount,0);
- const total=buy+sell;
- if(window.length<10||total<=0)return {status:'insufficient',reason:'최근 체결 표본 '+window.length+'건 (최소 10건 필요)',source};
- return {status:'ok',source,buy,sell,share:buy/total,ratio:buy/Math.max(sell,1),
-  count:window.length,spanMinutes:Math.round((newest-Math.min(...window.map(x=>x.timestamp)))/6000)/10};
-}
-function candidateAssessment(t,history,train,validation){
- const f=extractFeatures(history,history.length-1);
- if(!f)return null;
- const lastTs=Date.parse(history.at(-1).candle_date_time_utc+'Z');
- const fresh=Date.now()-lastTs<=SCAN_MAX_STALE_MS;
- const notAlreadyUp=t.signed_change_rate*100<=SCAN_MAX_24H_GAIN;
- const pre=earlyStage(f)&&fresh&&notAlreadyUp;
- const n=neighbors(f,train.filter(x=>earlyStage(x.f)),MIN_NEIGHBORS,t.market);
- if(n.length<MIN_NEIGHBORS)return {market:t.market,name:t.meta?.korean_name||t.market,price:t.trade_price,change:t.signed_change_rate*100,f,rate:0,hits:0,neighbors:n.length,category:'risk',reason:'급등 이전 조건에 맞는 과거 비교 표본 부족',date:history.at(-1).candle_date_time_kst};
- const hits=n.filter(x=>x.event).length,rate=hits/n.length;
- const validated=validation.selected>=MIN_VALIDATION_SIGNALS&&validation.hits>=3&&validation.precision>validation.baseline*1.2&&validation.precision>validation.trainBase;
- const candidate=pre&&validated&&rate>=validation.cutoff;
- const promising=pre&&rate>=validation.cutoff;
- const category=candidate?'candidate':promising?'watch':pre?'monitor':'risk';
- const reason=!fresh?'분봉 데이터가 오래되어 후보 제외':!notAlreadyUp?'현재 24시간 상승률 +8% 초과: 이미 급등한 종목 제외':!pre?'초기 전조·거래대금·변동성 조건 미충족':!validated?'시간순 검증 근거 부족':'과거 유사 패턴 검토';
- return {market:t.market,name:t.meta?.korean_name||t.market,price:t.trade_price,change:t.signed_change_rate*100,
-  f,rate,hits,neighbors:n.length,category,reason,date:history.at(-1).candle_date_time_kst};
-}
-$('scanPatterns').onclick=async()=>{
- if(scanBusy)return;
- if(!tickers.length){$('scanProgress').textContent='먼저 시세 연결을 기다려 주세요.';return}
- scanBusy=true;
- const btn=$('scanPatterns'),progress=$('scanProgress'),out=$('patternCandidates');
- btn.disabled=true;out.innerHTML='<p>전체 원화마켓 시세를 확인하고 거래대금·상승률 기준으로 최대 36종을 선별해 정밀 분석합니다. 최근 수집한 분봉은 15분 동안 재사용합니다.</p>';
- let failed=0,processed=0;
- try{
-  // Every listed KRW coin is examined, not only the highest-volume names.
-  const screening=selectScanTargets(tickers);
-  const targets=screening.targets;
-  if(!targets.length){out.textContent='현재 1차 거래대금·상승률 기준을 만족하는 종목이 없습니다.';progress.textContent='선별 종목 0개';$('candidates').textContent='0';return}
-  const records=[],train=[],test=[];
-  for(const t of targets){
-   progress.textContent='전체 '+screening.all+'종 시세 확인 → '+screening.eligible+'종 1차 통과 → 정밀 '+(++processed)+'/'+targets.length+' · '+t.market;
+ const stamp=s=>Date.parse(s+'Z');
+ const asc=a=>a.sort((x,y)=>x.candle_date_time_utc.localeCompare(y.candle_date_time_utc));
+ function vector(rows){
+  if(rows.length<97)return null;
+  const x=rows.slice(-97),t0=stamp(x[0].candle_date_time_utc);
+  for(let i=1;i<x.length;i++)if(stamp(x[i].candle_date_time_utc)!==t0+i*900000)return null;
+  const avg=a=>a.reduce((s,c)=>s+Number(c.candle_acc_trade_price||0),0)/a.length;
+  const p=i=>Number(x.at(i).trade_price),base=avg(x.slice(0,96));
+  const up=x.slice(-12).filter(c=>Number(c.trade_price)>Number(c.opening_price)).reduce((s,c)=>s+Number(c.candle_acc_trade_price||0),0);
+  const total=x.slice(-12).reduce((s,c)=>s+Number(c.candle_acc_trade_price||0),0);
+  const f=[(p(-1)/p(-5)-1)*100,(p(-1)/p(-13)-1)*100,(p(-1)/p(-25)-1)*100,(p(-1)/p(0)-1)*100,avg(x.slice(-4))/Math.max(base,1),avg(x.slice(-12))/Math.max(base,1),p(-1)/Math.max(...x.slice(0,96).map(c=>Number(c.high_price))),total?up/total:.5];
+  return f.every(Number.isFinite)?f:null;
+ }
+ const scale=[2,4,7,15,2,2,.06,.35];
+ const distance=(a,b)=>Math.sqrt(a.reduce((s,x,i)=>s+Math.min(16,((x-b[i])/scale[i])**2),0)/a.length);
+ const empty=()=>({version:1,done:[],events:[],examples:[],at:Date.now()});
+ function read(){try{const d=JSON.parse(localStorage.getItem(KEY)||'null');return d?.version===1&&Array.isArray(d.done)&&Array.isArray(d.events)&&Array.isArray(d.examples)?d:empty()}catch(e){return empty()}}
+ function save(d){try{localStorage.setItem(KEY,JSON.stringify(d))}catch(e){$('progress').textContent='저장 공간 부족: 데이터 저장에 실패했습니다.'}}
+ function stats(d){$('scanned').textContent=d.done.length;$('samples').textContent=d.examples.length}
+ async function marketData(){
+  if(!markets.length)markets=(await get('/market/all?isDetails=false')).filter(m=>m.market.startsWith('KRW-'));
+  const t=[];
+  for(let i=0;i<markets.length;i+=70)t.push(...await get('/ticker?markets='+encodeURIComponent(markets.slice(i,i+70).map(x=>x.market).join(','))));
+  tickers=t.map(x=>({...x,meta:markets.find(m=>m.market===x.market)}));
+  $('status').textContent='업비트 연결됨';
+ }
+ async function twoYears(market){
+  let to='',all=new Map();
+  for(let page=0;page<4;page++){
+   const batch=await get('/candles/days?market='+encodeURIComponent(market)+'&count=200'+(to?'&to='+encodeURIComponent(to):''));
+   if(!batch.length)break;
+   for(const c of batch)all.set(c.candle_date_time_utc,c);
+   const last=batch.at(-1).candle_date_time_utc;
+   if(batch.length<200||to===last+'Z')break;
+   to=last+'Z';await sleep(140);
+  }
+  const cutoff=Date.now()-731*86400000;
+  return [...all.values()].filter(c=>stamp(c.candle_date_time_utc)>cutoff&&stamp(c.candle_date_time_utc)<Date.now()-86400000);
+ }
+ async function eventBars(market,day){
+  // 11:00 KST = 02:00 UTC; exclusive cursor. Two pages cover prior day + event morning.
+  const to=day.slice(0,10)+'T02:00:00Z',all=new Map();let cursor=to;
+  for(let page=0;page<2;page++){
+   const batch=await get('/candles/minutes/15?market='+encodeURIComponent(market)+'&count=200&to='+encodeURIComponent(cursor));
+   if(!batch.length)break;
+   for(const c of batch)all.set(c.candle_date_time_utc,c);
+   const last=batch.at(-1).candle_date_time_utc;
+   if(batch.length<200||last+'Z'===cursor)break;
+   cursor=last+'Z';await sleep(140);
+  }
+  return asc([...all.values()]);
+ }
+ function extract(event,rows){
+  const start=stamp(event.day+'Z')+(-3600000); // day starts 09:00 KST; 08:00 is one hour earlier
+  const within=rows.filter(c=>{const t=stamp(c.candle_date_time_utc);return t>=start&&t<start+7200000});
+  if(within.length<5)return null;
+  const first=within.find(c=>stamp(c.candle_date_time_utc)===start);
+  if(!first)return null;
+  const open=Number(first.opening_price);
+  // Find first +3% intraday bar only if the 08:00-10:00 window eventually reaches +10%.
+  const high=Math.max(...within.map(c=>Number(c.high_price)));
+  if(high<open*1.10)return null;
+  const onset=within.find(c=>Number(c.high_price)>=open*1.03);
+  if(!onset)return null;
+  const idx=rows.findIndex(c=>c.candle_date_time_utc===onset.candle_date_time_utc);
+  // Strictly BEFORE onset candle. Feature window ends at preceding closed candle.
+  const f=vector(rows.slice(0,idx));
+  if(!f)return null;
+  return {...event,f,onset:onset.candle_date_time_utc,peakPct:(high/open-1)*100};
+ }
+ async function learn(d,selected){
+  const remaining=selected.filter(t=>!d.done.includes(t.market));
+  for(let i=0;i<remaining.length;i++){
+   const t=remaining[i];$('progress').textContent='2년 일봉 조사 '+(d.done.length+1)+'/'+selected.length+' · '+t.market;
    try{
-    const history=await fetchHistory(t.market,(p,max)=>{progress.textContent=p===0?'캐시 사용 '+processed+'/'+targets.length+' · '+t.market:'분봉 수집 '+processed+'/'+targets.length+' · '+t.market+' · '+p+'/'+max+'페이지'});
-    if(history.length<200)throw Error('과거 봉 부족');
-    const samples=historicalSamples(history);
-    records.push({t,history});
-    train.push(...samples.train);test.push(...samples.test);
-   }catch(e){failed++;console.warn('Historical data:',t.market,e)}
-   // Yield for mobile rendering and avoid hammering the public API.
-   await pause(180);
+    const days=await twoYears(t.market);
+    for(const c of days){
+     // Broad daily filter, final +10% determination uses 08:00-10:00 15m candles.
+     if(Number(c.high_price)/Number(c.opening_price)>=1.08&&Number(c.candle_acc_trade_price)>=1e8){
+      d.events.push({market:t.market,name:t.meta?.korean_name||t.market,day:c.candle_date_time_utc.slice(0,10)});
+     }
+    }
+    d.done.push(t.market);save(d);stats(d);
+   }catch(e){$('progress').textContent='조사 실패 '+t.market+' · '+e.message+' (재시도 가능)'}
+   await sleep(160);
   }
-  if(train.length<130){
-   out.innerHTML='<p>과거 데이터가 충분하지 않아 후보를 표시하지 않습니다. 수집 '+records.length+'종, 학습 '+train.length+'건, 검증 '+test.length+'건. API 조회 상태를 확인하세요.</p>';
-   $('candidates').textContent='0';
-   progress.textContent='학습 자료 부족 · 조회 실패 '+failed+'종';return;
+  // Event date is Upbit daily UTC date; event morning 08:00 occurs one hour BEFORE the daily candle.
+  // Events are only screening candidates; each gets checked with intraday bars.
+  const unique=[...new Map(d.events.map(e=>[e.market+'|'+e.day,e])).values()];
+  const chosen=unique.slice(0,MAX_EVENTS);
+  for(let i=0;i<chosen.length;i++){
+   const e=chosen[i],id=e.market+'|'+e.day;
+   if(d.examples.some(x=>x.market+'|'+x.day===id))continue;
+   $('progress').textContent='08~10시 급등 전조 확인 '+(i+1)+'/'+chosen.length+' · '+e.market+' · '+e.day;
+   try{const sample=extract(e,await eventBars(e.market,e.day));if(sample){d.examples.push(sample);save(d);stats(d)}}
+   catch(err){$('progress').textContent='과거 분봉 조회 실패 '+e.market+': '+err.message}
+   await sleep(150);
   }
-  // Global time cutoff prevents cross-market future leakage: no test-time sample is in training.
-  const allSamples=[...train,...test];
-  const orderedTimes=allSamples.map(x=>x.ts).sort((a,b)=>a-b);
-  const cutoffTime=orderedTimes[Math.floor(orderedTimes.length*.7)];
-  const chronologicalTrain=allSamples.filter(x=>x.ts<cutoffTime-HORIZON*HIST_INTERVAL*60000);
-  const chronologicalTest=allSamples.filter(x=>x.ts>=cutoffTime);
-  if(chronologicalTrain.length<100||chronologicalTest.length<30){
-   out.textContent='공통 시간 기준 학습·검증 구간의 표본이 부족해 후보를 표시하지 않습니다.';
-   $('candidates').textContent='0';progress.textContent='검증 표본 부족';return;
-  }
-  const validation=evaluateModel(chronologicalTrain,chronologicalTest);
-  const assessments=records.map(x=>candidateAssessment(x.t,x.history,chronologicalTrain,validation)).filter(Boolean);
-  const radarBase=records.map(x=>radarAssessment(x.t,x.history)).filter(Boolean).sort((a,b)=>b.score-a.score).slice(0,8);
-  const radar=[];
-  for(const x of radarBase){
-   const execution=await tradeExecution(x.market);
-   // Score is unchanged when ticks are unavailable; never substitute candle direction for real trades.
-   const executionPoints=execution.status==='ok'?Math.round((execution.share-.5)*30):0;
-   radar.push({...x,execution,score:Math.max(0,Math.min(100,x.score+executionPoints))});
-  }
-  for(const x of radar){
-   const available=x.execution.status==='ok';
-   const buy=available&&x.execution.share>=.55&&x.execution.count>=10;
-   const early=x.change<=5&&x.f[0]<=1.8&&x.f[1]<=3;
-   const volume=x.vol1>=1.15&&x.volumeTrend>=1.1;
-   const candleSupport=x.directionalShare>=.52&&x.closeStrength>=.55;
-   const sustained=x.vol1>=1.2&&x.volumeTrend>=1.2&&x.directionalShare>=.5;
-   x.stage=buy&&early&&sustained&&(x.breakoutAttempt||x.closeStrength>=.7)?'strengthening':
-    buy&&early&&volume?'detected':
-    !available&&early&&volume&&candleSupport?'unconfirmed':'watch';
-   x.stageReason=x.stage==='strengthening'?'체결 매수 우세·거래대금 지속·가격 강도 동반':
-    x.stage==='detected'?'체결 매수 우세·거래대금 증가 감지':
-    x.stage==='unconfirmed'?'분봉 전조는 관찰되지만 체결 데이터가 없어 미확인':
-    !available?'체결 데이터 미확인 (매도 우세로 간주하지 않음)':
-    !buy?'실제 체결 매수 방향 우세 미확인':
-    !early?'이미 상승했거나 단기 상승폭 큼':'거래대금 지속성 또는 가격 강도 부족';
-  }
-  const stageOrder={strengthening:0,detected:1,unconfirmed:2,watch:3};
-  radar.sort((a,b)=>stageOrder[a.stage]-stageOrder[b.stage]||b.score-a.score);
-  const detected=radar.filter(x=>x.stage==='detected'||x.stage==='strengthening');
-  const strengthened=radar.filter(x=>x.stage==='strengthening');
-  const unconfirmed=radar.filter(x=>x.stage==='unconfirmed');
-  const order={candidate:0,watch:1,monitor:2,risk:3};
-  assessments.sort((a,b)=>order[a.category]-order[b.category]||b.rate-a.rate);
-  const candidates=assessments.filter(x=>x.category==='candidate');
-  $('candidates').textContent=String(candidates.length);
-  const percent=x=>(x*100).toFixed(1)+'%';
-  const validationText='학습 '+chronologicalTrain.length+'개 구간 / 시간순 검증 '+chronologicalTest.length+'개 구간 (초기 전조 조건 학습 '+validation.trainEligible+'개 · 검증 '+validation.total+'개) · 해당 구간 기본 급등률 '+percent(validation.baseline)+
-   ' · 검증 신호 '+validation.selected+'건, 실제 성공 '+validation.hits+'건, 적중률 '+(validation.selected?percent(validation.precision):'표본 없음');
-  const summary='<article class="pattern-card"><b>과거 실제 급등과 비급등 구간 비교</b><p>원화마켓 전체 '+screening.all+'종 시세 확인 · 1차 선별 '+screening.eligible+'종 · 정밀 분석 '+targets.length+'종 중 '+records.length+'종 성공 · 15분봉 종목당 최대 '+(HIST_PAGES*200)+'개 · 60분 내 +3%를 급등 사건으로 정의</p><p>'+esc(validationText)+'</p><p>전체 종목에 공통 시간 경계(앞 70%/뒤 30%)를 적용하고 시간 경계의 겹치는 사건을 제외합니다. 이미 급등한 종목(24시간 +8% 초과, 3시간 +3% 초과 등)은 전조 후보에서 제외합니다. 검증 성과가 충분하지 않으면 급등 후보를 표시하지 않습니다. 시간대가 겹치는 표본과 종목 간 상관이 있으므로 이 수치는 미래 상승 확률이 아닙니다.</p></article>';
-  const renderAssessment=c=>{
-   const label=c.category==='candidate'?'초기 급등 전조 후보 (제한적 검증)':c.category==='watch'?'관찰 전용 · 검증 부족':c.category==='monitor'?'초기 조건 통과 · 유사 패턴 약함':'전조 제외 · 조건 미충족';
-   const details=c.f.map((x,i)=>featureNames[i]+': '+(i===7||i===8?(x*100).toFixed(1)+'%':i===4||i===5?x.toFixed(2)+'배':x.toFixed(2)+'%'));
-   return '<article class="pattern-card"><div class="pattern-head"><b>'+esc(c.name)+' <small>'+esc(c.market)+'</small></b><span>'+label+'</span></div>'+
-    '<p>현재 '+fmt(c.price,8)+'원 · 24시간 '+c.change.toFixed(2)+'% · 확정 15분봉 '+esc(c.date)+'</p>'+
-    '<p><b>판단: '+esc(c.reason)+'</b></p><p>학습 구간 유사 사례 '+c.neighbors+'건 · 이후 60분 내 +3% '+c.hits+'건 ('+percent(c.rate)+')</p>'+
-    '<ul>'+details.map(d=>'<li>'+esc(d)+'</li>').join('')+'</ul>'+
-    '<button data-add-watch="'+esc(c.market)+'">☆ 관심 종목 등록</button></article>';
-  };
-  const excluded=assessments.filter(x=>x.category!=='candidate');
-  const diagnostics={noFeatures:records.length-assessments.length,pre:assessments.filter(x=>x.category!=='risk').length,watch:assessments.filter(x=>x.category==='watch').length};
-  const observed=assessments.filter(x=>x.category==='watch').sort((a,b)=>b.rate-a.rate).slice(0,5);
-  const radarHTML='<section><h3>1단계 전조 감지 '+detected.length+'종 · 2단계 전조 강화 '+strengthened.length+'종 · 체결 미확인 관찰 '+unconfirmed.length+'종 · 3단계 과거 검증 통과 '+candidates.length+'종</h3><p>1·2단계는 검증된 예측이나 매수 신호가 아닙니다. 3단계만 별도 과거 검증 기준을 통과한 종목입니다.</p>'+
-   (radar.length?radar.map(x=>'<article class="pattern-card"><div class="pattern-head"><b>'+esc(x.name)+' <small>'+esc(x.market)+'</small></b><span>'+(x.stage==='strengthening'?'2단계 전조 강화':x.stage==='detected'?'1단계 전조 감지':x.stage==='unconfirmed'?'체결 미확인 관찰':'참고 관찰')+' · '+x.score+'/100</span></div><p>판정: '+esc(x.stageReason)+'</p><p>현재 '+fmt(x.price,8)+'원 · 24시간 '+x.change.toFixed(2)+'% · 확정 15분봉 '+esc(x.date)+'</p><p>최근 1시간 거래대금 '+x.vol1.toFixed(2)+'배 · 3시간 '+x.vol3.toFixed(2)+'배 · 1시간 가격 변화 '+x.f[0].toFixed(2)+'% · 3시간 '+x.f[1].toFixed(2)+'%</p><p>최근 3시간 양봉 거래대금 비중 '+(x.directionalShare*100).toFixed(1)+'% · 양봉/음봉 거래대금 '+x.upRatio.toFixed(2)+'배 · 거래대금 추세 '+x.volumeTrend.toFixed(2)+'배</p><p>봉 방향 판단: '+esc(x.pressure)+' · 직전 고점 돌파 시도 '+(x.breakoutAttempt?'있음':'없음')+' · 종가 위치 '+(x.closeStrength*100).toFixed(0)+'%</p><p>실제 최근 체결: '+(x.execution.status==='ok'?'['+esc(x.execution.source)+'] 시장가 매수 방향 거래대금 '+(x.execution.share*100).toFixed(1)+'% · 매수/매도 '+x.execution.ratio.toFixed(2)+'배 · 최근 최대 5분 '+x.execution.count+'건 표본':esc(x.execution.reason))+'</p><p>체결 데이터는 최대 200건 표본이며 전체 시장 매수세를 대표하지 않을 수 있습니다. 양봉·음봉 거래대금은 실제 체결 매수·매도량과 다릅니다. 관찰 점수는 상승 확률이나 매수 신호가 아닙니다.</p><button data-add-watch="'+esc(x.market)+'">☆ 관심 종목 등록</button></article>').join(''):'<p>현재 설정한 거래대금 증가 기준을 충족하는 관찰 종목이 없습니다.</p>')+'</section>';
-  out.innerHTML=summary+radarHTML+'<article class="pattern-card"><b>선별 단계 진단</b><p>현재 특징 계산 불가 '+diagnostics.noFeatures+'종 · 초기 조건 통과 '+diagnostics.pre+'종 · 유사 패턴 관찰 '+diagnostics.watch+'종 · 과거 검증 '+(validation.selected>=MIN_VALIDATION_SIGNALS?'신호 '+validation.selected+'건':'신호 부족')+'</p><p>후보 0개는 시장에 기회가 없다는 뜻이 아니라 현재 검증 기준에서 확증되지 않았다는 뜻입니다.</p></article>'+(candidates.length?candidates.map(renderAssessment).join(''):'<article class="pattern-card"><b>현재 검증 기준을 통과한 초기 급등 전조 후보가 없습니다.</b><p>검증에 실패한 신호를 성공한 것처럼 표시하지 않습니다. 아래 관찰 종목은 예측이 검증되지 않은 참고 자료입니다.</p></article>')+
-   (observed.length?'<section><h3>검증 미통과 · 초기 움직임 관찰 (매수 신호 아님)</h3>'+observed.map(renderAssessment).join('')+'</section>':'')+
-   (excluded.length?'<details><summary>관찰·제외 종목 전체 '+excluded.length+'종 보기</summary>'+excluded.map(renderAssessment).join('')+'</details>':'');
-  progress.textContent='전체 '+screening.all+'종 시세 · 정밀 '+records.length+'/'+targets.length+'종 · 1단계 감지 '+detected.length+'종 · 2단계 강화 '+strengthened.length+'종 · 체결 미확인 '+unconfirmed.length+'종 · 3단계 검증 '+candidates.length+'종 · 조회 실패 '+failed+'종 · '+new Date().toLocaleTimeString('ko-KR');
- }catch(e){out.textContent='분석 오류: '+e.message;progress.textContent='분석 실패'}
- finally{btn.disabled=false;scanBusy=false}
-};
-$('patternCandidates').addEventListener('click',e=>{
- const b=e.target.closest('[data-add-watch]');if(!b)return;
- watch.add(b.dataset.addWatch);localStorage.setItem('usl-watch',JSON.stringify([...watch]));render();b.textContent='★ 관심 종목 등록됨';
-});
-
-// Daily-candle research, with explicit out-of-sample time split.
-$('runBacktest').onclick=async()=>{
- const out=$('backtestResult'),btn=$('runBacktest');
- btn.disabled=true;
- out.textContent='최근 12개월 일봉 조회 중 (최대 2회 요청)...';
- try{
-  const market=$('backtestCoin').value,target=Number($('target').value),multiple=Number($('volumeMultiple').value);
-  // Exclude the current unfinished KST trading day by paging from today's 00:00 KST.
-  const now=new Date(),todayKst=new Date(now.getTime()+9*3600000).toISOString().slice(0,10);
-  const cutoff=new Date(todayKst+'T00:00:00+09:00');
-  const first=await get('/candles/days?market='+encodeURIComponent(market)+'&count=200&to='+encodeURIComponent(cutoff.toISOString()));
-  if(!Array.isArray(first)||!first.length)throw Error('일봉 응답이 비어 있습니다.');
-  const oldest=first[first.length-1].candle_date_time_utc;
-  const second=await get('/candles/days?market='+encodeURIComponent(market)+'&count=200&to='+encodeURIComponent(oldest+'Z'));
-  if(!Array.isArray(second))throw Error('두 번째 일봉 응답이 올바르지 않습니다.');
-  const unique=new Map([...first,...second].map(c=>[c.candle_date_time_utc,c]));
-  let candles=[...unique.values()].filter(c=>new Date(c.candle_date_time_utc+'Z')<cutoff).sort((a,b)=>a.candle_date_time_utc.localeCompare(b.candle_date_time_utc));
-  const yearAgo=new Date(cutoff);yearAgo.setUTCDate(yearAgo.getUTCDate()-365);
-  candles=candles.filter(c=>new Date(c.candle_date_time_utc+'Z')>=yearAgo);
-  if(candles.length<80)throw Error('분석 가능한 일봉이 80개 미만입니다. 상장 기간 또는 중계 서버의 /candles/days 및 to 지원을 확인하세요.');
-  const trainEnd=Math.floor(candles.length*.7),lookback=20,horizon=7;
-  function measure(from,to){
-   let n=0,signals=0,hits=0,events=0;
-   for(let i=Math.max(lookback,from);i<Math.min(to,candles.length-horizon);i++){
-    const prev=candles.slice(i-lookback,i),recent=prev.slice(-7);
-    const avg=recent.reduce((s,c)=>s+c.candle_acc_trade_volume,0)/recent.length;
-    const signal=candles[i].candle_acc_trade_volume>avg*multiple&&candles[i].trade_price>Math.max(...prev.map(c=>c.trade_price));
-    const futureHigh=Math.max(...candles.slice(i+1,i+1+horizon).map(c=>c.high_price));
-    const event=futureHigh>=candles[i].trade_price*(1+target);
-    n++;if(event)events++;if(signal){signals++;if(event)hits++}
-   }
-   return {n,signals,hits,events};
-  }
-  // Prevent train outcomes from looking into the holdout period.
-  const train=measure(lookback,trainEnd-horizon);
-  const test=measure(trainEnd,candles.length-horizon);
-  const pct=(a,b)=>b?((100*a/b).toFixed(1)+'%'):'표본 없음';
-  const block=(label,x)=>'<h3>'+label+'</h3><p>평가 '+x.n+'일 · 신호 '+x.signals+'건 · 적중 '+x.hits+'건 · 급등 사건 '+x.events+'건</p><p>정밀도 '+pct(x.hits,x.signals)+' · 재현율 '+pct(x.hits,x.events)+' · 무신호 포함 급등 빈도 '+pct(x.events,x.n)+'</p>';
-  out.innerHTML='<b>'+esc(market)+' · 일봉 '+candles.length+'개 · '+esc(candles[0].candle_date_time_kst.slice(0,10))+' ~ '+esc(candles[candles.length-1].candle_date_time_kst.slice(0,10))+'</b>'+block('탐색 구간 (앞 70%)',train)+block('시간순 별도 검증 (뒤 30%)',test)+'<p>거래량 '+multiple+'배 / 다음 7일 +'+(target*100).toFixed(0)+'% 기준. 일봉 종가 확정 뒤에야 신호가 확인됩니다. 검증 구간의 표본이 적으면 통계적으로 신뢰하기 어렵습니다.</p>';
- }catch(e){out.textContent='12개월 검증 실패: '+e.message+' (중계 서버에 일봉·to 경로를 추가해야 할 수 있습니다.)'}
- finally{btn.disabled=false}
-};
-
-// Fixed four-market comparison. Uses the same definition as individual daily research.
-$('compareCoins').onclick=async()=>{
- const btn=$('compareCoins'),out=$('comparisonResult');
- btn.disabled=true;
- const symbols=['KRW-BTC','KRW-SHIB','KRW-XRP','KRW-ETH'];
- const target=Number($('target').value),multiple=Number($('volumeMultiple').value);
- const now=new Date(),todayKst=new Date(now.getTime()+9*3600000).toISOString().slice(0,10);
- const cutoff=new Date(todayKst+'T00:00:00+09:00');
- const yearAgo=new Date(cutoff);yearAgo.setUTCDate(yearAgo.getUTCDate()-365);
- const pct=(a,b)=>b?(100*a/b).toFixed(1)+'%':'—';
- async function fetchYear(market){
-  const path='/candles/days?market='+encodeURIComponent(market)+'&count=200&to=';
-  const first=await get(path+encodeURIComponent(cutoff.toISOString()));
-  if(!Array.isArray(first)||!first.length)throw Error('일봉 없음');
-  const second=await get(path+encodeURIComponent(first[first.length-1].candle_date_time_utc+'Z'));
-  if(!Array.isArray(second))throw Error('추가 일봉 없음');
-  const unique=new Map([...first,...second].map(c=>[c.candle_date_time_utc,c]));
-  return [...unique.values()].filter(c=>{
-   const d=new Date(c.candle_date_time_utc+'Z');
-   return d>=yearAgo&&d<cutoff;
-  }).sort((a,b)=>a.candle_date_time_utc.localeCompare(b.candle_date_time_utc));
+  save(d);
  }
- function evaluate(candles){
-  const lookback=20,horizon=7,split=Math.floor(candles.length*.7);
-  function section(from,to){
-   let days=0,signals=0,hits=0,events=0;
-   for(let i=Math.max(lookback,from);i<Math.min(to,candles.length-horizon);i++){
-    const prev=candles.slice(i-lookback,i);
-    const avg=prev.slice(-7).reduce((s,c)=>s+c.candle_acc_trade_volume,0)/7;
-    const signal=candles[i].candle_acc_trade_volume>avg*multiple&&candles[i].trade_price>Math.max(...prev.map(c=>c.trade_price));
-    const event=Math.max(...candles.slice(i+1,i+1+horizon).map(c=>c.high_price))>=candles[i].trade_price*(1+target);
-    days++;if(event)events++;if(signal){signals++;if(event)hits++}
-   }
-   return {days,signals,hits,events};
-  }
-  return {train:section(lookback,split-horizon),test:section(split,candles.length-horizon)};
+ async function currentVector(market){
+  const data=await get('/candles/minutes/15?market='+encodeURIComponent(market)+'&count=120');
+  const limit=Math.floor(Date.now()/900000)*900000;
+  return vector(asc(data.filter(c=>stamp(c.candle_date_time_utc)<limit)));
  }
- try{
-  const results=[];
-  for(const symbol of symbols){
-   out.textContent='12개월 일봉 비교 분석 중... '+symbol+' ('+(results.length+1)+'/4)';
-   try{
-    const candles=await fetchYear(symbol);
-    if(candles.length<80)throw Error('일봉 80개 미만');
-    results.push({symbol,days:candles.length,...evaluate(candles)});
-   }catch(e){results.push({symbol,error:e.message})}
+ async function rank(d){
+  if(!d.examples.length){$('results').innerHTML='<p>08~10시 실제 +10% 급등 전조 표본을 확보하지 못했습니다. 무작위 후보는 표시하지 않습니다. 조사 범위와 API 접근을 확인해 주세요.</p>';$('compared').textContent='0';return}
+  const selected=tickers.filter(t=>t.market.startsWith('KRW-')&&Number(t.acc_trade_price_24h)>1e8&&t.signed_change_rate<.10&&t.signed_change_rate>-.15).sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h).slice(0,MAX_CURRENT);
+  const matches=[];
+  for(let i=0;i<selected.length;i++){
+   const t=selected[i];$('progress').textContent='현재 패턴 비교 '+(i+1)+'/'+selected.length+' · '+t.market;
+   try{const f=await currentVector(t.market);if(!f)continue;const best=d.examples.map(e=>({e,dist:distance(f,e.f)})).sort((a,b)=>a.dist-b.dist)[0];matches.push({t,f,best,similarity:Math.round(100/(1+best.dist))})}
+   catch(e){}
+   if(i%5===0)await sleep(140);
   }
-  const rows=results.map(r=>{
-   if(r.error)return '<tr><td>'+esc(r.symbol)+'</td><td colspan="6">조회 실패: '+esc(r.error)+'</td></tr>';
-   const t=r.test;
-   return '<tr><td>'+esc(r.symbol)+'</td><td>'+r.days+'일</td><td>'+t.signals+'건</td><td>'+t.hits+'건</td><td>'+pct(t.hits,t.signals)+'</td><td>'+pct(t.hits,t.events)+'</td><td>'+pct(t.events,t.days)+'</td></tr>';
-  }).join('');
-  const totals=results.filter(r=>!r.error).reduce((a,r)=>{
-   for(const k of ['days','signals','hits','events'])a[k]+=r.test[k];
-   return a;
-  },{days:0,signals:0,hits:0,events:0});
-  out.innerHTML='<b>4종 비교 · 검증 구간(뒤 30%)</b><p>향후 7일 +'+(target*100).toFixed(0)+'% · 거래량 '+multiple+'배 · 코인별 12개월 자료</p><div class="tablewrap"><table><thead><tr><th>코인</th><th>일봉</th><th>신호</th><th>적중</th><th>정밀도</th><th>재현율</th><th>기본 급등률</th></tr></thead><tbody>'+rows+'</tbody></table></div><p>합산 신호 '+totals.signals+'건 · 적중 '+totals.hits+'건 · 정밀도 '+pct(totals.hits,totals.signals)+' · 기본 급등률 '+pct(totals.events,totals.days)+'</p><p>주의: 같은 날 여러 코인에서 신호가 발생할 수 있어 합산 건수는 독립 표본이 아닙니다. 조건을 비교 결과에 맞춰 조정하면 별도 검증의 의미가 약해집니다. 일봉 종가 확정 후 신호이며 실제 체결 수익률이 아닙니다.</p>';
- }catch(e){out.textContent='비교 검증 실패: '+e.message}
- finally{btn.disabled=false}
-};
-
-load();setInterval(()=>{if(!document.hidden)load()},60000);
-if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
+  matches.sort((a,b)=>a.best.dist-b.best.dist);
+  $('compared').textContent=matches.length;
+  const top=matches.slice(0,5);
+  const time=nowKst(),inWindow=time>='08:00'&&time<'10:00';
+  $('results').innerHTML='<p>'+ (inWindow?'현재 오전 8~10시 관찰 구간입니다.':'현재는 오전 8~10시 밖입니다. 표시된 유사도는 해당 시간대 급등 예측이 아닙니다.')+'</p>'+top.map((m,i)=>'<article class="item"><span class="score">유사도 '+m.similarity+'/100</span><h3>'+(i+1)+'. '+esc(m.t.meta?.korean_name||m.t.market)+' <small>'+esc(m.t.market)+'</small></h3><p>현재가 '+Number(m.t.trade_price).toLocaleString('ko-KR',{maximumFractionDigits:8})+'원 · 24시간 '+(m.t.signed_change_rate*100).toFixed(2)+'%</p><p>1시간 '+m.f[0].toFixed(2)+'% · 3시간 '+m.f[1].toFixed(2)+'% · 1시간 거래대금 '+m.f[4].toFixed(2)+'배</p><p>과거 유사 사례: '+esc(m.best.e.name)+' · '+esc(m.best.e.day)+' · 08~10시 최고 +'+m.best.e.peakPct.toFixed(1)+'%</p></article>').join('')+(top.length?'':'<p>비교 가능한 현재 15분봉이 없습니다.</p>');
+  $('progress').textContent='2년 조사 '+d.done.length+'종 · 08~10시 급등 전조 표본 '+d.examples.length+'건 · 현재 비교 '+matches.length+'종 · TOP '+top.length;
+ }
+ async function run(train){
+  if(busy)return;busy=true;$('start').disabled=$('refresh').disabled=$('reset').disabled=true;
+  try{await marketData();const d=read();stats(d);
+   if(train){const selected=tickers.filter(t=>Number(t.acc_trade_price_24h)>1e8).sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h).slice(0,MAX_MARKETS);await learn(d,selected)}
+   await rank(d);
+  }catch(e){$('progress').textContent='실행 실패: '+e.message}
+  finally{busy=false;$('start').disabled=$('refresh').disabled=$('reset').disabled=false}
+ }
+ $('start').onclick=()=>run(true);
+ $('refresh').onclick=()=>run(false);
+ $('reset').onclick=()=>{if(!confirm('저장된 2년 학습 데이터를 모두 삭제할까요?'))return;localStorage.removeItem(KEY);stats(empty());$('compared').textContent='0';$('results').innerHTML='<p>학습 데이터가 초기화되었습니다.</p>'};
+ stats(read());$('status').textContent='실행 대기';
+})();
