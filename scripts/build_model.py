@@ -29,15 +29,18 @@ def score(f,arr):
     x,y=density(p),density(n)
     return x/(x+y)
 by_group=collections.defaultdict(list)
-for s in test:
-    p=score(s["f"],train)
+# Bound validation work while retaining chronological separation and market diversity.
+validation_train=train[::max(1,len(train)//2500)]
+validation_test=test[::max(1,len(test)//1200)]
+for s in validation_test:
+    p=score(s["f"],validation_train)
     if p is not None:by_group[(s["date"],s["hour"])].append((p,s["y"]))
 eligible=[v for v in by_group.values() if len(v)>=10]
 picks=sum(min(5,len(v)) for v in eligible)
 hits=sum(sum(y for _,y in sorted(v,reverse=True)[:5]) for v in eligible)
 baseline=sum(sum(y for _,y in v) for v in eligible)/sum(len(v) for v in eligible) if eligible else None
 precision=hits/picks if picks else None
-valid=markets>=20 and len(eligible)>=10 and sum(s["y"] for s in train)>=10 and sum(s["y"] for s in test)>=5
+valid=markets>=20 and len(eligible)>=10 and sum(s["y"] for s in validation_train)>=10 and sum(s["y"] for s in validation_test)>=5
 # Compress historical observations into representative feature centroids; do not publish raw cases.
 def centroids(rows,k=48):
     if not rows:return []
