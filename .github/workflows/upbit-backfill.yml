@@ -1,6 +1,9 @@
 name: Two-year all-hours backfill
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/upbit-backfill.yml'
   schedule:
     - cron: '20 1,7,13,19 * * *'
 permissions:
