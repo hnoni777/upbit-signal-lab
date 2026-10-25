@@ -70,7 +70,7 @@ def main():
     markets=[x["market"] for x in api("/market/all",{"isDetails":"false"}) if x["market"].startswith("KRW-")]
     # All currently listed KRW markets, deterministic order; includes illiquid coins.
     pending=[m for m in sorted(markets) if m not in STATE_DATA["completed"]]
-    budget=int(os.environ.get("COINS_PER_RUN","2"))
+    budget=int(os.environ.get("COINS_PER_RUN","8"))
     for market in pending[:budget]:
         try:
             samples,n=collect(market)
@@ -83,5 +83,7 @@ def main():
             print("FAILED",market,str(ex),flush=True)
         STATE_DATA["updated"]=datetime.datetime.now(datetime.timezone.utc).isoformat()
         STATE.write_text(json.dumps(STATE_DATA,ensure_ascii=False,indent=2))
-    print("Completed",len(STATE_DATA["completed"]),"of",len(markets))
+    STATE_DATA["allMarketsComplete"]=all(m in STATE_DATA["completed"] for m in markets)
+    STATE.write_text(json.dumps(STATE_DATA,ensure_ascii=False,indent=2))
+    print("Completed",len(STATE_DATA["completed"]),"of",len(markets),"finished",STATE_DATA["allMarketsComplete"])
 if __name__=="__main__":main()
