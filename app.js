@@ -94,17 +94,17 @@
     for(const c of days){
      // Broad daily filter, final +10% determination uses 08:00-10:00 15m candles.
      if(Number(c.high_price)/Number(c.opening_price)>=1.08&&Number(c.candle_acc_trade_price)>=1e8){
-      d.events.push({market:t.market,name:t.meta?.korean_name||t.market,day:c.candle_date_time_utc.slice(0,10)});
+      const date=c.candle_date_time_utc.slice(0,10);d.events.push({market:t.market,name:t.meta?.korean_name||t.market,day:date});const next=new Date(Date.parse(date+'T00:00:00Z')+86400000).toISOString().slice(0,10);if(Date.parse(next+'T00:00:00Z')<Date.now()-86400000)d.events.push({market:t.market,name:t.meta?.korean_name||t.market,day:next});
      }
     }
     d.done.push(t.market);save(d);stats(d);
    }catch(e){$('progress').textContent='조사 실패 '+t.market+' · '+e.message+' (재시도 가능)'}
    await sleep(160);
   }
-  // Event date is Upbit daily UTC date; event morning 08:00 occurs one hour BEFORE the daily candle.
+  // Daily candle boundaries are 09:00 KST; check both the screened date and following morning to cover 08:00-09:00.
   // Events are only screening candidates; each gets checked with intraday bars.
   const unique=[...new Map(d.events.map(e=>[e.market+'|'+e.day,e])).values()];
-  const chosen=unique.slice(0,MAX_EVENTS);
+  unique.sort((a,b)=>b.day.localeCompare(a.day));const chosen=[],perCoin=new Map();for(const e of unique){const n=perCoin.get(e.market)||0;if(n>=4)continue;chosen.push(e);perCoin.set(e.market,n+1);if(chosen.length>=MAX_EVENTS)break}
   for(let i=0;i<chosen.length;i++){
    const e=chosen[i],id=e.market+'|'+e.day;
    if(d.examples.some(x=>x.market+'|'+x.day===id))continue;
