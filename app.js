@@ -1,5 +1,5 @@
 'use strict';
-/* v37: fixed-time, leakage-safe positive/negative pattern learner + chronological holdout */
+/* v38: fixed-time, leakage-safe positive/negative pattern learner + chronological holdout */
 (()=>{
 const API='https://upbit-signal-proxy.parkdam6.workers.dev/v1',KEY='usl-morning-v36-dataset',LIMIT=35,EVENT_LIMIT=420,CONTROL_LIMIT=140,STEP=900000;
 const $=x=>document.getElementById(x),sleep=ms=>new Promise(r=>setTimeout(r,ms)),esc=x=>String(x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -46,13 +46,38 @@ function sample(market,name,date,a){
  return {market,name,date,f,y:gain>=10?1:0,gain,drawdown};
 }
 function split(d){const a=d.samples.slice().sort((x,y)=>x.date.localeCompare(y.date));const dates=[...new Set(a.map(x=>x.date))];const boundary=dates[Math.floor(dates.length*.8)]||'9999';return {train:a.filter(x=>x.date<boundary),test:a.filter(x=>x.date>=boundary),boundary}}
-function classify(f,train){if(train.length<12||!train.some(x=>x.y===1)||!train.some(x=>x.y===0))return null;const neighbors=train.map(x=>({x,d:dist(f,x.f)})).sort((a,b)=>a.d-b.d).slice(0,Math.min(15,train.length));const weight=n=>1/(.15+n.d)**2;const denom=neighbors.reduce((s,n)=>s+weight(n),0);const raw=neighbors.reduce((s,n)=>s+n.x.y*weight(n),0)/denom;return {raw,nearest:neighbors[0],n:neighbors.length}}
+function classify(f,train){
+ if(train.length<20)return null;
+ const pos=train.filter(x=>x.y===1),neg=train.filter(x=>x.y===0);
+ if(pos.length<5||neg.length<10)return null;
+ // Balanced class neighborhoods prevent the majority class from overwhelming rare spikes.
+ const k=7,neighbors=(arr)=>arr.map(x=>({x,d:dist(f,x.f)})).sort((a,b)=>a.d-b.d).slice(0,k);
+ const p=neighbors(pos),n=neighbors(neg),weight=z=>1/(.25+z.d)**2;
+ const density=a=>a.reduce((s,z)=>s+weight(z),0)/a.length;
+ const pd=density(p),nd=density(n);
+ const raw=pd/(pd+nd);
+ const nearest=[...p,...n].sort((a,b)=>a.d-b.d)[0];
+ return Number.isFinite(raw)?{raw,nearest,n:p.length+n.length}:null;
+}
 function validation(d){
- const {train,test,boundary}=split(d);const scored=test.map(x=>({x,p:classify(x.f,train)})).filter(x=>x.p);const byDay=new Map();for(const row of scored){if(!byDay.has(row.x.date))byDay.set(row.x.date,[]);byDay.get(row.x.date).push(row)}
- let picks=0,hits=0,baseHit=0;for(const rows of byDay.values()){baseHit+=rows.filter(z=>z.x.y).length;for(const z of rows.sort((a,b)=>b.p.raw-a.p.raw).slice(0,5)){picks++;hits+=z.x.y}}
- const precision=picks?100*hits/picks:null,base=scored.length?100*baseHit/scored.length:null;const valid=train.filter(x=>x.y).length>=10&&test.filter(x=>x.y).length>=5&&byDay.size>=10&&scored.length>=40&&picks>=30;
- $('validation').textContent='시간순 분리 검증 · 학습 '+train.length+'건 / 미래 검증 '+test.length+'건 (경계 '+boundary+') · TOP5 적중 '+hits+'/'+picks+(precision===null?' (표본 부족)':' = '+precision.toFixed(1)+'%')+(base===null?'':' · 전체 양성 비율 '+base.toFixed(1)+'%');
- $('validation').textContent+=(valid?' · 기초 검증 표본 충족':' · 검증 표본 부족(성과 미확정)');return {train,test,scored,precision,base,valid};
+ const {train,test,boundary}=split(d);
+ const scored=test.map(x=>({x,p:classify(x.f,train)})).filter(x=>x.p);
+ const byDay=new Map();
+ for(const z of scored){if(!byDay.has(z.x.date))byDay.set(z.x.date,[]);byDay.get(z.x.date).push(z)}
+ let picks=0,hits=0,baseHits=0,eligible=0,days=0,positiveDays=0;
+ // Only days with at least 5 observed assets qualify as a TOP5 comparison.
+ for(const rows of byDay.values()){
+  if(rows.length<5)continue;
+  days++;eligible+=rows.length;baseHits+=rows.filter(z=>z.x.y).length;
+  if(rows.some(z=>z.x.y))positiveDays++;
+  for(const z of rows.sort((a,b)=>b.p.raw-a.p.raw).slice(0,5)){picks++;hits+=z.x.y}
+ }
+ const precision=picks?100*hits/picks:null,base=eligible?100*baseHits/eligible:null;
+ const lift=precision!==null&&base>0?precision/base:null;
+ const valid=train.filter(x=>x.y).length>=10&&test.filter(x=>x.y).length>=5&&days>=10&&picks>=50;
+ $('validation').textContent='시간순 분리 검증 · 학습 '+train.length+'건 / 미래 검증 '+test.length+'건 (경계 '+boundary+') · 비교 가능 날짜 '+days+'일 · TOP5 적중 '+hits+'/'+picks+(precision===null?' (검증 불가)':' = '+precision.toFixed(1)+'%')+(base===null?'':' · 동일 날짜 전체 급등 '+base.toFixed(1)+'%')+(lift===null?'':' · 기준 대비 '+lift.toFixed(2)+'배')+(valid?' · 검증 표본 기준 충족':' · 검증 표본 부족');
+ if(!days)$('validation').textContent+=' · 하루 5종목 이상 과거 관측이 필요합니다';
+ return {train,test,scored,precision,base,lift,valid,days};
 }
 async function learn(d){
  const chosen=tickers.filter(t=>Number(t.acc_trade_price_24h)>1e8).sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h).slice(0,LIMIT);
@@ -74,7 +99,7 @@ async function rank(d){
  const rows=[];for(let i=0;i<selected.length;i++){const t=selected[i];$('progress').textContent='실시간 비교 '+(i+1)+'/'+selected.length+' · '+t.market;try{const f=await currentVector(t.market),p=f&&classify(f,train);if(p)rows.push({t,f,p})}catch(e){}if(i%5===0)await sleep(100)}
  rows.sort((a,b)=>b.p.raw-a.p.raw);$('compared').textContent=rows.length;
  const inWindow=kstHour(Date.now())>='08:30'&&kstHour(Date.now())<'10:00';
- $('results').innerHTML='<p>'+(inWindow?'오전 관찰 구간 ·':'관찰 시간대 밖 ·')+' 유사 사례 기반 상대 순위이며 검증된 상승 확률이 아닙니다. '+(v.valid?'시간순 검증 표본 기준 통과':'검증 표본이 부족하여 실험용 순위만 표시')+'</p>'+rows.slice(0,5).map((r,i)=>'<article class="item"><span class="score">상대 점수 '+Math.round(r.p.raw*100)+'/100</span><h3>'+(i+1)+'. '+esc(r.t.name)+' <small>'+esc(r.t.market)+'</small></h3><p>현재가 '+Number(r.t.trade_price).toLocaleString('ko-KR',{maximumFractionDigits:8})+'원 · 24시간 '+(r.t.signed_change_rate*100).toFixed(2)+'%</p><p>1시간 '+r.f[0].toFixed(2)+'% · 3시간 '+r.f[1].toFixed(2)+'% · 거래대금 변화 '+(Math.expm1(r.f[4])).toFixed(2)+'배</p><p>가장 가까운 과거 사례 '+esc(r.p.nearest.x.market)+' / '+esc(r.p.nearest.x.date)+' / 실제 최고 '+r.p.nearest.x.gain.toFixed(1)+'%</p></article>').join('');
+ $('results').innerHTML='<p>'+(inWindow?'오전 관찰 구간 ·':'관찰 시간대 밖 ·')+' 유사 사례 기반 상대 순위이며 검증된 상승 확률이 아닙니다. '+(v.valid?'시간순 검증 표본 기준 통과':'검증 표본이 부족하여 실험용 순위만 표시')+'</p>'+rows.slice(0,5).map((r,i)=>'<article class="item"><span class="score">패턴 점수 '+Math.round(r.p.raw*100)+'/100</span><h3>'+(i+1)+'. '+esc(r.t.name)+' <small>'+esc(r.t.market)+'</small></h3><p>현재가 '+Number(r.t.trade_price).toLocaleString('ko-KR',{maximumFractionDigits:8})+'원 · 24시간 '+(r.t.signed_change_rate*100).toFixed(2)+'%</p><p>1시간 '+r.f[0].toFixed(2)+'% · 3시간 '+r.f[1].toFixed(2)+'% · 거래대금 변화 '+(Math.expm1(r.f[4])).toFixed(2)+'배</p><p>가장 가까운 과거 사례 '+esc(r.p.nearest.x.market)+' / '+esc(r.p.nearest.x.date)+' / 실제 최고 '+r.p.nearest.x.gain.toFixed(1)+'%</p></article>').join('');
  $('progress').textContent='학습 '+d.samples.length+'건 · 성공 '+d.samples.filter(x=>x.y).length+'건 · 실패 '+d.samples.filter(x=>!x.y).length+'건 · 현재 비교 '+rows.length+'종';
 }
 async function run(train){if(busy)return;busy=true;for(const x of ['start','refresh','reset'])$(x).disabled=true;try{await marketData();const d=read();stats(d);if(train&&!d.completed)await learn(d);await rank(d)}catch(e){$('progress').textContent='오류: '+e.message}finally{busy=false;for(const x of ['start','refresh','reset'])$(x).disabled=false}}
