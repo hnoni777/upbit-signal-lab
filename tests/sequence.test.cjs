@@ -11,6 +11,14 @@ test('unfinished/future candles never change features',()=>{const a=confirmed();
 test('sorted deduplication is deterministic and malformed prices fail closed',()=>{const a=confirmed();assert.deepEqual(S.detect(a,cutoff),S.detect([...a,a[0]].reverse(),cutoff));a[59].trade_price=NaN;assert.equal(S.detect(a,cutoff).stage,'missing');});
 test('target, stop, and ambiguous same-bar ordering account for cost conservatively',()=>{const a=future();a[2].high_price=104;assert.equal(S.outcome(a,cutoff).result,'target');assert.equal(S.outcome(a,cutoff).net,3);a[1].low_price=97;assert.equal(S.outcome(a,cutoff).result,'stop');assert.equal(S.outcome(a,cutoff).net,-2.3);a[1].high_price=104;assert.equal(S.outcome(a,cutoff).result,'ambiguous');});
 test('incomplete evaluation is unknown, not a win/loss',()=>{assert.equal(S.outcome(future().slice(1),cutoff),null);});
+test('typed API no-trade minutes are filled with zero turnover, without inventing price changes',()=>{
+ const a=confirmed().map(c=>({...c,unit:1}));a.splice(10,1);
+ const filled=S.regularize(a,cutoff-60*60000,cutoff);
+ assert.equal(filled.length,60);assert.equal(filled[10].candle_acc_trade_price,0);assert.equal(filled[10].trade_price,filled[9].trade_price);
+ assert.equal(S.detect(a,cutoff).stage,'confirmed');
+ // Without a starting observation or documented unit, missing remains unknown.
+ assert.equal(S.detect(a.slice(1),cutoff).stage,'missing');
+});
 test('entry is next bar open rather than previous signal close',()=>{const a=future().map(c=>({...c,opening_price:110,trade_price:110,high_price:111,low_price:109}));assert.equal(S.outcome(a,cutoff).entry,110);assert.equal(S.outcome(a,cutoff).result,'timeout');});
 test('live scan requests every market, renders both stages, and records no probability',async()=>{
  const vm=require('node:vm'),fs=require('node:fs');

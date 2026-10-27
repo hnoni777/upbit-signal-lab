@@ -10,7 +10,7 @@ const groups=new Map();
 for(const {market,rows} of markets){
  for(let i=60;i+30<=rows.length;i++){
   const cutoff=S.time(rows[i]);if(cutoff<boundary)continue;
-  const signal=S.detect(rows.slice(i-60,i),cutoff),outcome=S.outcome(rows.slice(i,i+30),cutoff);
+  const signal=S.detect(rows.slice(i-60,i),cutoff),outcome=S.outcome(rows.slice(i-1,i+31),cutoff,S.time(rows.at(-1))+60000);
   // Both strategies use precisely the same observable liquidity and data universe.
   if(!outcome||!signal.f||['illiquid','extended'].includes(signal.stage))continue;
   if(!groups.has(cutoff))groups.set(cutoff,[]);

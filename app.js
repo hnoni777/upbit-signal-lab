@@ -17,7 +17,7 @@ async function get(path){
 const stamp=ms=>new Date(ms).toLocaleString('ko-KR',{timeZone:'Asia/Seoul',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
 function settle(market,rows,cutoff){
  for(const r of history.filter(r=>r.market===market&&!r.outcome&&!r.expired&&r.entryCutoff+30*60000<=cutoff)){
-  const result=S.outcome(rows,r.entryCutoff);
+  const result=S.outcome(rows,r.entryCutoff,cutoff);
   if(result)r.outcome=result;
   else r.expired=true; // Missing history is never a loss or a success.
  }

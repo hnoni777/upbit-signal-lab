@@ -10,8 +10,22 @@
  const close=c=>Number(c.trade_price);
  function ordered(rows){return [...new Map(rows.map(c=>[time(c),c])).values()].sort((a,b)=>time(a)-time(b));}
  function valid(c){return ['opening_price','trade_price','low_price','high_price'].every(k=>Number.isFinite(Number(c[k]))&&Number(c[k])>0)&&Number.isFinite(Number(c.candle_acc_trade_price))&&Number(c.candle_acc_trade_price)>=0&&Number(c.low_price)<=Math.min(Number(c.opening_price),close(c))&&Number(c.high_price)>=Math.max(Number(c.opening_price),close(c))&&Number.isFinite(time(c));}
+ // Upbit omits minutes with no trades. Only a typed 1-minute API snapshot
+ // covering the start boundary can supply a previous close for zero-trade bars.
+ function regularize(rows,start,end){
+  const raw=ordered(rows.filter(c=>time(c)<end));
+  if(!raw.length||raw.some(c=>!valid(c)||Number(c.unit)!==1)||time(raw[0])>start)return raw.filter(c=>time(c)>=start);
+  const byTime=new Map(raw.map(c=>[time(c),c]));
+  let previous=raw.filter(c=>time(c)<=start).at(-1);const out=[];
+  for(let t=start;t<end;t+=MINUTE){
+   let c=byTime.get(t);
+   if(!c){const p=close(previous);c={unit:1,candle_date_time_utc:new Date(t).toISOString(),opening_price:p,trade_price:p,high_price:p,low_price:p,candle_acc_trade_price:0};}
+   out.push(c);previous=c;
+  }
+  return out;
+ }
  function features(rows,cutoff){
-  const a=ordered(rows.filter(c=>time(c)<cutoff)).slice(-60);
+  const a=regularize(rows,cutoff-60*MINUTE,cutoff);
   if(a.length!==60||a.some((c,i)=>!valid(c)||time(c)!==cutoff-(60-i)*MINUTE))return null;
   const base=a.slice(0,45),setup=a.slice(45,55),trigger=a.slice(55),prev=setup.slice(0,5),last=setup.slice(5);
   const b=avg(base);if(b<=0)return null;
@@ -39,8 +53,9 @@
   if(!f.breakout&&f.rise>=-.5&&f.rise<3)return {stage:'watch',f,reason:'선행 거래 증가와 저점 유지 · 돌파 확인 전'};
   return {stage:'quiet',f,reason:'선행 흔적 이후 돌파 유지 조건 미충족'};
  }
- function outcome(rows,cutoff){
-  const a=ordered(rows.filter(c=>time(c)>=cutoff&&time(c)<cutoff+CONFIG.horizon*MINUTE));
+ function outcome(rows,cutoff,asOf){
+  const end=cutoff+CONFIG.horizon*MINUTE;
+  const a=asOf>=end?regularize(rows,cutoff,end):ordered(rows.filter(c=>time(c)>=cutoff&&time(c)<end));
   if(a.length!==CONFIG.horizon||a.some((c,i)=>!valid(c)||time(c)!==cutoff+i*MINUTE))return null;
   const entry=Number(a[0].opening_price),target=entry*(1+(CONFIG.target+CONFIG.cost)/100),stop=entry*(1-CONFIG.stop/100);
   let result='timeout',net=100*(close(a.at(-1))/entry-1)-CONFIG.cost;
@@ -52,6 +67,6 @@
   }
   return {result,net,entry,maxRise:100*(high(a)/entry-1),maxFall:100*(low(a)/entry-1),end:cutoff+CONFIG.horizon*MINUTE};
  }
- const api={CONFIG,time,features,detect,outcome};
+ const api={CONFIG,time,features,detect,outcome,regularize};
  if(typeof module!=='undefined'&&module.exports)module.exports=api;else root.SequenceSignal=api;
 })(typeof globalThis!=='undefined'?globalThis:this);
