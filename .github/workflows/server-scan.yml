@@ -8,6 +8,7 @@ on:
     paths:
       - scripts/server_scan.cjs
       - sequence.js
+      - detail.js
       - .github/workflows/server-scan.yml
 permissions:
   contents: write
@@ -24,7 +25,7 @@ jobs:
         with:
           node-version: '22'
       - name: Verify detector and server transitions
-        run: node --test tests/sequence.test.cjs tests/server.test.cjs
+        run: node --test tests/*.test.cjs
       - name: Load durable server state
         run: |
           git fetch origin server-data

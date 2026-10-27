@@ -1,24 +1,44 @@
 'use strict';
-/* v53: server results only; all quotation requests run on the server. */
+/* v54: server results only; all quotation requests run on the server. */
 (()=>{
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let busy=false,timer=null;
 const stamp=ms=>new Date(ms).toLocaleString('ko-KR',{timeZone:'Asia/Seoul',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
-function card(r){const f=r.signal.f;return '<article class="item"><h3>'+esc(r.name)+' <small>'+esc(r.market)+'</small></h3><p>신호 점수 '+f.score.toFixed(0)+'/100 · 성공 확률 아님</p><p>분석 기준가 '+f.price.toLocaleString('ko-KR',{maximumFractionDigits:8})+'원 · 최근 15분 '+f.rise.toFixed(2)+'%</p><p>선행 10분 거래대금 '+f.setupRatio.toFixed(2)+'배 → 최근 5분 '+f.triggerRatio.toFixed(2)+'배 · 증가 지속 '+f.persistence+'/10봉</p><p>'+esc(r.signal.reason)+'</p><small>닫힌 봉 기준 '+stamp(r.cutoff)+' · 확인 '+stamp(r.checkedAt)+'</small></article>';}
+const labels={maintaining:'흐름 유지',pullback:'눌림 관찰',watch:'초기 흔적 관찰',weakening:'신호 약화'};
+const num=(v,n=2)=>Number.isFinite(v)?v.toLocaleString('ko-KR',{maximumFractionDigits:n}):'자료 없음';
+function spark(values){
+ if(!Array.isArray(values)||values.length<2)return '';
+ const min=Math.min(...values),range=Math.max(...values)-min||1;
+ const points=values.map((v,i)=>(i*240/(values.length-1)).toFixed(1)+','+(49-(v-min)*44/range).toFixed(1)).join(' ');
+ return '<svg viewBox="0 0 240 54" role="img" aria-label="최근 60분 종가 흐름" style="width:100%;height:65px"><polyline points="'+points+'" fill="none" stroke="#70e7c6" stroke-width="1.6"/></svg>';
+}
+function card(r){
+ const f=r.signal.f,d=r.detail;
+ if(!d)return '<article class="item"><h3>'+esc(r.name)+'</h3><p>이전 버전 결과 · 상세 분석을 기다리는 중입니다.</p></article>';
+ const risk=d.flags.length?'<p class="risk">'+d.flags.map(esc).join(' · ')+'</p>':'';
+ return '<article class="item"><span class="phase '+d.status+'">'+labels[d.status]+'</span><h3>'+esc(r.name)+' <small>'+esc(r.market)+'</small></h3><p>분석 기준가 '+num(d.price,8)+'원 · 최근 15분 '+num(d.returns[15])+'%</p>'+spark(d.spark)+
+ '<p>최근 1분 '+num(d.returns[1])+'% · 3분 '+num(d.returns[3])+'% · 5분 '+num(d.returns[5])+'%</p>'+
+ '<p>거래 증가 '+(d.continuation?'지속':'둔화')+' · 최근 3분 '+num(d.recentRatio)+'배 · 실제 거래 발생 '+d.active15+'/15분</p>'+
+ '<p>직전 고점 대비 '+num(d.pullback)+'% · 단기 추세 '+(d.aboveTrend?'상승 정렬':'미정렬')+' · 돌파 구간 '+(d.hold?'유지 관찰':'유지 미확인')+'</p>'+risk+
+ (r.refreshFailed?'<p class="risk">후보 재조회 실패 · 이전 봉 기준으로 표시합니다.</p>':'')+
+ (r.followUp?'<p class="risk">이전 신호 추적: 현재 최초 탐지 조건을 유지하지 못합니다. 새 신호로 집계하지 않습니다.</p>':'')+
+ '<details><summary>가격 구간·시장 비교 자세히</summary><p>최근 10분 저점 '+num(d.support,8)+'원 · 최근 20분 고점 '+num(d.resistance,8)+'원</p><p>직전 돌파 관찰선 '+num(d.breakoutLevel,8)+'원 · 20분 거래량 가중평균 '+num(d.vwap20,8)+'원</p><p>최근 15분 BTC 대비 '+num(d.relativeBtc15)+'%p · 최근 변동폭(ATR) '+num(d.atrPct)+'%</p><p>가격 구간은 관측값이며 매수가·손절가를 제시하는 것이 아닙니다. 점수나 조건은 성공 확률이 아닙니다.</p></details><small>상세 봉 기준 '+stamp(d.cutoff)+' · 최초 관찰 '+stamp(r.firstSeen||r.cutoff)+'</small></article>';
+}
 function render(rows,counts,cutoff,errors){
- const sections=[['watch','조기 관심 · 돌파 전'],['confirmed','돌파 확인 · 선행 흔적 동반']];
- $('results').innerHTML='<p>동일 기준 시각 '+stamp(cutoff)+' · 각 단계 최대 5개. 규칙은 검증 전 연구 가설이며 점수는 확률이 아닙니다.</p>'+sections.map(([stage,label])=>{
- const group=rows.filter(r=>r.signal.stage===stage).sort((a,b)=>b.signal.f.score-a.signal.f.score);
- return '<h3>'+label+' · '+group.length+'종목</h3>'+(group.length?group.slice(0,5).map(card).join(''):'<p>조건을 충족한 종목이 없습니다.</p>');
- }).join('')+'<p>진단: 정상 분석 '+counts.valid+' · 연속 봉 부족 '+counts.missing+' · 거래대금 부족 '+counts.illiquid+' · 이미 상승 '+counts.extended+' · 순서 조건 미달 '+counts.quiet+' · API 오류 '+errors+'종목</p>';
+ const sections=['maintaining','pullback','watch','weakening'];
+ $('results').innerHTML='<p>전체 시장 기준 '+stamp(cutoff)+' · 후보는 더 최근의 닫힌 봉으로 재확인합니다. 각 상태 최대 5개. 고정 규칙은 검증 전이며 흐름 유지는 상승 예측이 아닙니다.</p>'+sections.map(key=>{
+  const group=rows.filter(r=>(r.detail?.status||'watch')===key).sort((a,b)=>(b.detail?.quality||0)-(a.detail?.quality||0));
+  return '<h3>'+labels[key]+' · '+group.length+'종목</h3>'+(group.length?group.slice(0,5).map(card).join(''):'<p>현재 이 상태의 후보가 없습니다.</p>');
+ }).join('')+'<p>진단: 정상 분석 '+counts.valid+' · 봉 자료 부족 '+counts.missing+' · 거래대금 부족 '+counts.illiquid+' · 이미 상승 '+counts.extended+' · 최초 조건 미달 '+counts.quiet+' · API 오류 '+errors+'종목</p>';
 }
 const SERVER_URL='https://api.github.com/repos/hnoni777/upbit-signal-lab/contents/data/server-state.json?ref=server-data';
 let lastServer=null;
 function serverPerformance(state){
- const lines=['<strong>서버가 누적 기록한 신호 후 30분 결과</strong>'];
+ const lines=['<strong>'+(state.analysisVersion===54?'v54 상세 조건으로 새로 기록한 신호 후 30분 결과':'이전 버전의 신호 후 30분 결과')+'</strong>'];
  for(const [stage,label] of [['watch','조기 관심'],['confirmed','돌파 확인']]){
-  const stats=state.totals[stage],pending=state.history.filter(r=>r.stage===stage&&!r.outcome&&!r.expired).length;
+  const detailed=state.analysisVersion===54;
+  const stats=(detailed?state.detailTotals:state.totals)[stage],pending=state.history.filter(r=>r.stage===stage&&(detailed?r.strategyVersion===54:!r.strategyVersion)&&!r.outcome&&!r.expired).length;
   lines.push('<p>'+label+' · 평가 '+stats.evaluated+'건 · 목표 도달 '+stats.target+'건 · 손절선 먼저 '+stats.stop+'건 · 순서 불명 '+stats.ambiguous+'건 · 시간 종료 '+stats.timeout+'건'+(stats.evaluated?' · 관측 적중률 '+(100*stats.target/stats.evaluated).toFixed(1)+'%':'')+' · 대기 '+pending+'건 · 자료 누락 '+stats.missing+'건</p>');
  }
  lines.push('<p>서버 분석 완료 뒤 다음 1분봉 시가를 가상 진입으로 관찰합니다. 30분 이내 비용 가정 0.3%를 뺀 +3% 목표 / 가격 -2% 손절선 순서를 평가합니다. 실제 매매나 사용자가 화면을 연 시점의 수익률이 아닙니다. 순서 불명은 성공에서 제외합니다.</p>');
@@ -29,11 +49,11 @@ function paintServer(state){
  const snapshot=state.snapshot,age=Date.now()-snapshot.completedAt,delayed=age>10*60000||snapshot.stale;
  render(snapshot.candidates,snapshot.counts,snapshot.cutoff,snapshot.counts.errors);
  $('scanned').textContent=snapshot.counts.requested;$('compared').textContent=snapshot.counts.valid;
- $('samples').textContent=snapshot.candidates.filter(r=>r.signal.stage==='watch').length;
- $('negatives').textContent=snapshot.candidates.filter(r=>r.signal.stage==='confirmed').length;
+ $('samples').textContent=snapshot.candidates.filter(r=>r.detail?.status!=='weakening').length;
+ $('negatives').textContent=snapshot.candidates.filter(r=>r.detail?.status==='weakening').length;
  $('status').textContent=delayed?'서버 결과 지연 · 시각 확인':snapshot.counts.errors?'서버 감시 · 일부 조회 실패':'서버 감시 결과';
- $('progress').textContent='서버 분석 완료 '+stamp(snapshot.completedAt)+' · 봉 기준 '+stamp(snapshot.cutoff)+' · '+snapshot.counts.requested+'종목 요청 / '+snapshot.counts.valid+'종목 유효 / 오류 '+snapshot.counts.errors+'종목 · 서버 누적 '+state.runCount+'회 · 5분 간격 예약(실행 지연 가능)'+(delayed?' · 오래된 결과입니다. 현재 진입 신호로 보지 마세요.':'')+' · 이 화면 갱신 '+stamp(Date.now());
- $('validation').textContent='휴대폰 화면과 관계없이 서버가 분석·기록합니다. 예약 실행은 정각을 보장하지 않으며 신호의 예측 성능은 아직 검증되지 않았습니다.';
+ $('progress').textContent='서버 분석 완료 '+stamp(snapshot.completedAt)+' · 봉 기준 '+stamp(snapshot.cutoff)+' · '+snapshot.counts.requested+'종목 요청 / '+snapshot.counts.valid+'종목 유효 / 오류 '+snapshot.counts.errors+'종목 · 상세 제외 '+(snapshot.excluded||0)+'종목 / 재조회 오류 '+(snapshot.refreshErrors||0)+'종목 · 서버 누적 '+state.runCount+'회 · 5분 간격 예약(실행 지연 가능)'+(delayed?' · 오래된 결과입니다. 현재 진입 신호로 보지 마세요.':'')+' · 이 화면 갱신 '+stamp(Date.now());
+ $('validation').textContent='휴대폰 화면과 관계없이 서버가 분석·기록합니다. 예약 실행은 정각을 보장하지 않으며 1·3·5·15분 흐름과 후보 재확인을 함께 봅니다. 예측 성능은 아직 검증되지 않았으며 이전 버전 기록과 v54 집계를 구분합니다.';
  serverPerformance(state);
 }
 async function loadServer(){

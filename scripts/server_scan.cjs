@@ -1,6 +1,7 @@
 'use strict';
 const fs=require('node:fs');
 const S=require('../sequence.js');
+const D=require('../detail.js');
 const MINUTE=60000, API=process.env.UPBIT_API_BASE||'https://api.upbit.com/v1';
 const emptyStats=()=>({evaluated:0,target:0,stop:0,ambiguous:0,timeout:0,missing:0,netTotal:0});
 function initial(){return {schema:52,runCount:0,history:[],totals:{watch:emptyStats(),confirmed:emptyStats()}};}
@@ -12,12 +13,15 @@ function readState(path){
 }
 function recordOutcome(state,record,outcome){
  if(record.outcome||record.expired)return;
- const stats=state.totals[record.stage];
+ const stats=(record.strategyVersion===54?state.detailTotals:state.totals)[record.stage];
  if(outcome){record.outcome=outcome;stats.evaluated++;stats[outcome.result]++;stats.netTotal+=outcome.net;}
  else {record.expired=true;stats.missing++;}
 }
 async function scan(previous,{get,now=Date.now,onProgress=()=>{}}){
  const state=structuredClone(previous),startedAt=now(),cutoff=Math.floor(startedAt/MINUTE)*MINUTE;
+ state.detailTotals??={watch:emptyStats(),confirmed:emptyStats()};
+ const previousRows=new Map((previous.snapshot?.candidates||[]).filter(r=>cutoff-r.cutoff<=30*MINUTE).map(r=>[r.market,r]));
+ const barCache=new Map();
  const markets=(await get('/market/all?isDetails=false')).filter(m=>m.market.startsWith('KRW-'));
  if(!markets.length)throw Error('No KRW markets; previous snapshot preserved');
  const counts={requested:markets.length,valid:0,missing:0,illiquid:0,extended:0,quiet:0,errors:0};
@@ -27,6 +31,7 @@ async function scan(previous,{get,now=Date.now,onProgress=()=>{}}){
   const m=markets[next++];
   try{
    const rows=await get('/candles/minutes/1?market='+encodeURIComponent(m.market)+'&count=200&to='+encodeURIComponent(new Date(cutoff).toISOString()));
+   barCache.set(m.market,rows);
    for(const record of state.history.filter(r=>r.market===m.market&&!r.outcome&&!r.expired&&r.entryCutoff+30*MINUTE<=cutoff)){
     let result=S.outcome(rows,record.entryCutoff,cutoff);
     if(!result){
@@ -43,17 +48,54 @@ async function scan(previous,{get,now=Date.now,onProgress=()=>{}}){
    else{
     counts.valid++;
     if(['watch','confirmed'].includes(signal.stage))candidates.push({market:m.market,name:m.korean_name||m.market,signal,cutoff,checkedAt:now()});
-    else counts[signal.stage]++;
+    else {
+     counts[signal.stage]++;
+     const old=previousRows.get(m.market);
+     if(old&&cutoff-(old.firstSeen||old.cutoff)<=30*MINUTE)candidates.push({market:m.market,name:m.korean_name||m.market,signal:{...signal,stage:'watch'},cutoff,checkedAt:now(),followUp:true,firstSeen:old.firstSeen||old.cutoff});
+    }
    }
   }catch(e){counts.errors++;errorMarkets.push(m.market);}
   finally{finished++;onProgress({finished,total:markets.length,market:m.market});}
  }}
  await Promise.all(Array.from({length:Math.min(3,markets.length)},worker));
  if(counts.errors>markets.length*.2)throw Error('Too many API failures ('+counts.errors+'/'+markets.length+'); previous snapshot preserved');
+ // Recheck all detected/follow-up candidates at the same newer closed-minute cutoff.
+ const detailCutoff=Math.floor(now()/MINUTE)*MINUTE;
+ let refreshIndex=0,refreshErrors=0;
+ async function refreshWorker(){while(refreshIndex<candidates.length){
+  const row=candidates[refreshIndex++];
+  row.firstSeen??=previousRows.get(row.market)?.firstSeen||row.cutoff;
+  try{
+   if(detailCutoff>cutoff){
+    const rows=await get('/candles/minutes/1?market='+encodeURIComponent(row.market)+'&count=200&to='+encodeURIComponent(new Date(detailCutoff).toISOString()));
+    barCache.set(row.market,rows);const latest=S.detect(rows,detailCutoff);
+    row.cutoff=detailCutoff;row.checkedAt=now();
+    if(['watch','confirmed'].includes(latest.stage)){row.signal=latest;row.followUp=false;}
+    else {row.signal={...latest,stage:'watch'};row.followUp=true;}
+   }
+  }catch(e){row.refreshFailed=true;refreshErrors++;}
+ }}
+ await Promise.all(Array.from({length:Math.min(3,candidates.length)},refreshWorker));
+ // Relative strength uses a BTC candle with exactly the same cutoff as the candidate.
+ const btcByCutoff=new Map();
+ for(const t of new Set(candidates.map(r=>r.cutoff))){
+  try{
+   const rows=t===cutoff?barCache.get('KRW-BTC'):await get('/candles/minutes/1?market=KRW-BTC&count=200&to='+encodeURIComponent(new Date(t).toISOString()));
+   const detail=rows?D.analyze(rows,t):null;btcByCutoff.set(t,detail?.returns[15]??null);
+  }catch(e){btcByCutoff.set(t,null);}
+ }
+ let excluded=0;
+ const detailed=candidates.filter(row=>{
+  row.detail=D.analyze(barCache.get(row.market)||[],row.cutoff,{market:row.market,btcReturn:btcByCutoff.get(row.cutoff)??null,previous:previousRows.get(row.market)?.detail});
+  if(!row.detail||row.detail.excluded){excluded++;return false;}
+  if(row.followUp)row.detail.status='weakening';
+  return true;
+ });
  const completedAt=now(),stale=completedAt-cutoff>3*MINUTE;
- if(!stale)for(const row of candidates){
+ for(const row of detailed){
   const stage=row.signal.stage;
-  if(!state.history.some(r=>r.market===row.market&&r.stage===stage&&Math.abs(cutoff-r.cutoff)<30*MINUTE))state.history.push({id:row.market+'|'+stage+'|'+cutoff,market:row.market,name:row.name,stage,cutoff,observedAt:completedAt,entryCutoff:Math.floor(completedAt/MINUTE)*MINUTE+MINUTE,score:row.signal.f.score});
+  if(row.followUp||row.refreshFailed||row.detail.status==='weakening'||completedAt-row.cutoff>3*MINUTE)continue;
+  if(!state.history.some(r=>r.strategyVersion===54&&r.market===row.market&&r.stage===stage&&Math.abs(row.cutoff-r.cutoff)<30*MINUTE))state.history.push({id:row.market+'|54|'+stage+'|'+row.cutoff,strategyVersion:54,market:row.market,name:row.name,stage,cutoff:row.cutoff,observedAt:completedAt,entryCutoff:Math.floor(completedAt/MINUTE)*MINUTE+MINUTE,score:row.signal.f.score,detailStatus:row.detail.status});
  }
  const listed=new Set(markets.map(m=>m.market));
  for(const r of state.history.filter(r=>!r.outcome&&!r.expired&&!listed.has(r.market)&&cutoff-r.entryCutoff>24*60*MINUTE))recordOutcome(state,r,null);
@@ -61,7 +103,8 @@ async function scan(previous,{get,now=Date.now,onProgress=()=>{}}){
  state.history=[...completed,...pending].sort((a,b)=>a.cutoff-b.cutoff);
  state.runCount++;state.completedAt=completedAt;
  state.quoteSource=API==='https://api.upbit.com/v1'?'upbit-direct':'custom';
- state.snapshot={cutoff,startedAt,completedAt,stale,counts,errorMarkets,candidates:candidates.sort((a,b)=>b.signal.f.score-a.signal.f.score)};
+ state.analysisVersion=54;
+ state.snapshot={cutoff,detailCutoff,startedAt,completedAt,stale,counts,errorMarkets,refreshErrors,excluded,candidates:detailed.sort((a,b)=>b.detail.quality-a.detail.quality)};
  state.schedule={requestedMinutes:5,provider:'GitHub Actions',exactTiming:false};
  return state;
 }

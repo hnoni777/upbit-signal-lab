@@ -13,9 +13,9 @@ test('server scans the whole universe and deduplicates repeated observations',as
 test('a later independent server run settles signals while all phones can be offline',async()=>{
  const first=await scan(initial(),{get:getter(),now:()=>cutoff+10000});
  const second=await scan(first,{get:getter(cutoff+35*MIN),now:()=>cutoff+35*MIN+10000});
- assert.equal(second.totals.watch.evaluated,6);assert.equal(second.totals.watch.timeout,6);
- const third=await scan(second,{get:getter(cutoff+35*MIN),now:()=>cutoff+35*MIN+10000});assert.equal(third.totals.watch.evaluated,6);
- assert.equal(first.totals.watch.evaluated,0);
+ assert.equal(second.detailTotals.watch.evaluated,6);assert.equal(second.detailTotals.watch.timeout,6);
+ const third=await scan(second,{get:getter(cutoff+35*MIN),now:()=>cutoff+35*MIN+10000});assert.equal(third.detailTotals.watch.evaluated,6);
+ assert.equal(first.detailTotals.watch.evaluated,0);
 });
 test('API outage throws without mutating the previous durable snapshot',async()=>{
  const state=await scan(initial(),{get:getter(),now:()=>cutoff+10000});const before=JSON.stringify(state);
@@ -25,7 +25,7 @@ test('API outage throws without mutating the previous durable snapshot',async()=
 test('partial query failure preserves that market pending evaluation',async()=>{
  const first=await scan(initial(),{get:getter(),now:()=>cutoff+10000});
  const second=await scan(first,{get:async p=>p.includes('KRW-T0')?Promise.reject(Error('one coin offline')):getter(cutoff+35*MIN)(p),now:()=>cutoff+35*MIN+10000});
- assert.equal(second.snapshot.counts.errors,1);assert.equal(second.totals.watch.evaluated,5);
+ assert.equal(second.snapshot.counts.errors,1);assert.equal(second.detailTotals.watch.evaluated,5);
  assert.equal(second.history.find(r=>r.market==='KRW-T0').outcome,undefined);
 });
 test('late scan labels stale snapshot and does not pretend to have observed fresh signals',async()=>{
@@ -44,6 +44,21 @@ test('default app reads server results without starting a device-side market sca
  await el('start').onclick();
  assert.ok(urls.every(url=>url.includes('/contents/data/server-state.json?ref=server-data')));
  assert.equal(el('scanned').textContent,6);assert.equal(el('samples').textContent,6);
- assert.match(el('status').textContent,/서버 감시/);assert.match(el('forward').innerHTML,/서버가 누적/);
+ assert.match(el('status').textContent,/서버 감시/);assert.match(el('forward').innerHTML,/v54 상세 조건/);
  state.snapshot.completedAt=cutoff-20*MIN;await el('refresh').onclick();assert.match(el('status').textContent,/지연/);
+});
+test('legacy outcomes are preserved separately from v54 validation',async()=>{
+ const old=initial();old.history.push({market:'KRW-T0',stage:'watch',cutoff:cutoff-40*MIN,entryCutoff:cutoff-35*MIN});
+ const result=await scan(old,{get:getter(),now:()=>cutoff+10000});
+ assert.equal(result.totals.watch.evaluated,1);assert.equal(result.detailTotals.watch.evaluated,0);
+ assert.ok(result.history.some(r=>r.strategyVersion===54));assert.equal(old.totals.watch.evaluated,0);
+});
+test('lost setup remains visible as follow-up without adding a fresh signal',async()=>{
+ const first=await scan(initial(),{get:getter(),now:()=>cutoff+10000});
+ const end=cutoff+5*MIN;
+ const quiet=bars(end).map(c=>({...c,candle_acc_trade_price:1e6}));
+ const second=await scan(first,{get:async p=>p.startsWith('/market/all')?markets:quiet,now:()=>end+10000});
+ assert.equal(second.snapshot.candidates.length,6);
+ assert.ok(second.snapshot.candidates.every(r=>r.followUp&&r.detail.status==='weakening'));
+ assert.equal(second.history.length,6);
 });
