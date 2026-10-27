@@ -5,10 +5,13 @@ const API='https://upbit-signal-proxy.parkdam6.workers.dev/v1',KEY='usl-sequence
 const $=id=>document.getElementById(id),sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let busy=false,timer=null,history=[],storageOK=true;
+let requestQueue=Promise.resolve();
+async function pace(){requestQueue=requestQueue.then(()=>sleep(160));await requestQueue;}
 try{const raw=JSON.parse(localStorage.getItem(KEY)||'[]');history=Array.isArray(raw)?raw.filter(r=>r.version===51&&typeof r.market==='string'&&Number.isFinite(r.cutoff)&&['watch','confirmed'].includes(r.stage)):[];}catch(e){storageOK=false;}
 function save(){try{localStorage.setItem(KEY,JSON.stringify(history));storageOK=true;}catch(e){storageOK=false;}}
 async function get(path){
  for(let i=0;i<3;i++){
+  await pace();
   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),12000);
   try{const r=await fetch(API+path,{signal:controller.signal,cache:'no-store'});if(!r.ok)throw Error('API '+r.status);const rows=await r.json();if(!Array.isArray(rows))throw Error('배열 응답 없음');return rows;}
   catch(e){if(i===2)throw e;await sleep(800*(i+1));}finally{clearTimeout(timeout);}
@@ -60,8 +63,9 @@ async function run(){
   const markets=(await get('/market/all?isDetails=false')).filter(m=>m.market.startsWith('KRW-'));
   $('scanned').textContent=markets.length;
   // No market-cap or top-60 preselection: every current KRW pair is requested.
-  for(let i=0;i<markets.length;i++){
-   const m=markets[i];$('progress').textContent='1분봉 순서 분석 '+(i+1)+'/'+markets.length+' · '+m.market;
+  let nextIndex=0;
+  async function scanWorker(){while(nextIndex<markets.length){
+   const i=nextIndex++,m=markets[i];$('progress').textContent='1분봉 순서 분석 '+(i+1)+'/'+markets.length+' · '+m.market;
    try{
     const bars=await get('/candles/minutes/1?market='+encodeURIComponent(m.market)+'&count=200&to='+encodeURIComponent(new Date(cutoff).toISOString()));
     settle(m.market,bars,cutoff);
@@ -77,7 +81,8 @@ async function run(){
     }
    }catch(e){errors++;}finally{await sleep(180);}
    $('compared').textContent=counts.valid;
-  }
+  }}
+  await Promise.all(Array.from({length:Math.min(3,markets.length)},()=>scanWorker()));
   const stale=Date.now()-cutoff>3*60000;
   // Keep the observed candidates for inspection but label stale runs explicitly.
   const displayedAt=Date.now();
