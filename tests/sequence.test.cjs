@@ -26,9 +26,9 @@ test('live scan requests every market, renders both stages, and records no proba
  const store=new Map(),requests=[];const now=cutoff+10000;
  class Clock extends Date{constructor(...a){super(...(a.length?a:[now]));}static now(){return now;}}
  const markets=Array.from({length:7},(_,i)=>({market:'KRW-T'+i,korean_name:'테스트'+i}));
- const context={window:{SequenceSignal:S},document:{getElementById:el},Date:Clock,AbortController,console,localStorage:{getItem:k=>store.get(k)||null,setItem:(k,v)=>store.set(k,v)},setTimeout:(cb,ms)=>{if(ms<2000)queueMicrotask(cb);return 1;},clearTimeout(){},confirm:()=>true,fetch:async url=>{requests.push(url);return {ok:true,json:async()=>url.includes('/market/all')?markets:url.includes('KRW-T0')?confirmed():bars()};}};
- vm.runInNewContext(fs.readFileSync('app.js','utf8'),context);await el('start').onclick();
- assert.equal(requests.length,8);assert.equal(el('compared').textContent,7);
+ const context={window:{SequenceSignal:S},document:{getElementById:el,addEventListener(){}},Date:Clock,AbortController,console,localStorage:{getItem:k=>store.get(k)||null,setItem:(k,v)=>store.set(k,v)},setTimeout:(cb,ms)=>{if(ms<2000)queueMicrotask(cb);return 1;},clearTimeout(){},confirm:()=>true,fetch:async url=>{requests.push(url);return {ok:true,json:async()=>url.includes('raw.githubusercontent.com')?{schema:52,totals:{},history:[],snapshot:null}:url.includes('/market/all')?markets:url.includes('KRW-T0')?confirmed():bars()};}};
+ vm.runInNewContext(fs.readFileSync('app.js','utf8'),context);await el('reset').onclick();
+ assert.equal(requests.filter(u=>!u.includes('raw.githubusercontent.com')).length,8);assert.equal(el('compared').textContent,7);
  assert.match(el('results').innerHTML,/조기 관심/);assert.match(el('results').innerHTML,/돌파 확인/);
  const records=JSON.parse([...store.values()][0]);assert.equal(records.length,7);assert.ok(records.every(r=>r.entryCutoff>r.observedAt));
  assert.match(el('validation').textContent,/아직 검증하지 않았습니다/);

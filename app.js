@@ -1,5 +1,5 @@
 'use strict';
-/* v51: causal minute-sequence hypotheses and local forward observation. */
+/* v52: persistent scheduled server snapshots; optional local instant analysis. */
 (()=>{
 const API='https://upbit-signal-proxy.parkdam6.workers.dev/v1',KEY='usl-sequence-v51-observations',S=window.SequenceSignal;
 const $=id=>document.getElementById(id),sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -96,11 +96,49 @@ async function run(){
  }catch(e){$('status').textContent='분석 실패';$('progress').textContent='조회 오류: '+e.message;}
  finally{
   save();performance();busy=false;for(const id of ['start','refresh','reset'])$(id).disabled=false;
-  if($('auto').checked)timer=setTimeout(run,60000);
+  if($('auto').checked)timer=setTimeout(loadServer,60000);
  }
 }
-$('start').onclick=run;$('refresh').onclick=run;
-$('reset').onclick=()=>{if(!confirm('이 기기에 기록한 v51 신호 관찰 결과를 삭제할까요?'))return;history=[];save();performance();};
-$('auto').onchange=()=>{clearTimeout(timer);timer=null;if($('auto').checked&&!busy)run();};
-$('status').textContent='분석 대기';performance();
+const SERVER_URL='https://raw.githubusercontent.com/hnoni777/upbit-signal-lab/server-data/data/server-state.json';
+let lastServer=null;
+function serverPerformance(state){
+ const lines=['<strong>서버가 누적 기록한 신호 후 30분 결과</strong>'];
+ for(const [stage,label] of [['watch','조기 관심'],['confirmed','돌파 확인']]){
+  const stats=state.totals[stage],pending=state.history.filter(r=>r.stage===stage&&!r.outcome&&!r.expired).length;
+  lines.push('<p>'+label+' · 평가 '+stats.evaluated+'건 · 목표 도달 '+stats.target+'건 · 손절선 먼저 '+stats.stop+'건 · 순서 불명 '+stats.ambiguous+'건 · 시간 종료 '+stats.timeout+'건'+(stats.evaluated?' · 관측 적중률 '+(100*stats.target/stats.evaluated).toFixed(1)+'%':'')+' · 대기 '+pending+'건 · 자료 누락 '+stats.missing+'건</p>');
+ }
+ lines.push('<p>서버 분석 완료 뒤 다음 1분봉 시가를 가상 진입으로 관찰합니다. 30분 이내 비용 가정 0.3%를 뺀 +3% 목표 / 가격 -2% 손절선 순서를 평가합니다. 실제 매매나 사용자가 화면을 연 시점의 수익률이 아닙니다. 순서 불명은 성공에서 제외합니다.</p>');
+ $('forward').innerHTML=lines.join('');
+}
+function paintServer(state){
+ if(!state.snapshot){$('status').textContent='서버 첫 분석 대기';$('progress').textContent='서버가 첫 전체 시장 분석을 진행합니다. 화면을 닫아도 작업은 계속됩니다.';return;}
+ const snapshot=state.snapshot,age=Date.now()-snapshot.completedAt,delayed=age>10*60000||snapshot.stale;
+ render(snapshot.candidates,snapshot.counts,snapshot.cutoff,snapshot.counts.errors);
+ $('scanned').textContent=snapshot.counts.requested;$('compared').textContent=snapshot.counts.valid;
+ $('samples').textContent=snapshot.candidates.filter(r=>r.signal.stage==='watch').length;
+ $('negatives').textContent=snapshot.candidates.filter(r=>r.signal.stage==='confirmed').length;
+ $('status').textContent=delayed?'서버 결과 지연 · 시각 확인':snapshot.counts.errors?'서버 감시 · 일부 조회 실패':'서버 감시 결과';
+ $('progress').textContent='서버 분석 완료 '+stamp(snapshot.completedAt)+' · 봉 기준 '+stamp(snapshot.cutoff)+' · '+snapshot.counts.requested+'종목 요청 / '+snapshot.counts.valid+'종목 유효 / 오류 '+snapshot.counts.errors+'종목 · 서버 누적 '+state.runCount+'회 · 5분 간격 예약(실행 지연 가능)'+(delayed?' · 오래된 결과입니다. 현재 진입 신호로 보지 마세요.':'')+' · 이 화면 갱신 '+stamp(Date.now());
+ $('validation').textContent='휴대폰 화면과 관계없이 서버가 분석·기록합니다. 예약 실행은 정각을 보장하지 않으며 신호의 예측 성능은 아직 검증되지 않았습니다.';
+ serverPerformance(state);
+}
+async function loadServer(){
+ if(busy)return;clearTimeout(timer);timer=null;
+ try{
+  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),15000);
+  let response;try{response=await fetch(SERVER_URL+'?t='+Math.floor(Date.now()/60000),{cache:'no-store',signal:controller.signal});}finally{clearTimeout(timeout);}
+  if(!response.ok)throw Error('결과 조회 '+response.status);
+  const state=await response.json();if(state.schema!==52||!state.totals||!Array.isArray(state.history))throw Error('서버 결과 형식 오류');
+  lastServer=state;paintServer(state);
+ }catch(e){
+  if(lastServer)paintServer(lastServer);
+  $('status').textContent='서버 결과 조회 실패';$('progress').textContent='서버 결과를 가져오지 못했습니다: '+e.message+' · 화면의 결과가 있다면 이전 자료입니다. 서버 마지막 완료 시각을 확인해 주세요.';
+ }finally{if($('auto').checked)timer=setTimeout(loadServer,60000);}
+}
+$('start').onclick=loadServer;$('refresh').onclick=loadServer;
+$('reset').onclick=run;
+$('auto').onchange=()=>{clearTimeout(timer);timer=null;if($('auto').checked&&!busy)loadServer();};
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!busy)loadServer();});
+$('status').textContent='서버 결과 연결 중';
+loadServer();
 })();
