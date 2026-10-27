@@ -33,7 +33,7 @@ function render(rows,counts,cutoff,errors){
  }).join('')+'<p>진단: 정상 분석 '+counts.valid+' · 봉 자료 부족 '+counts.missing+' · 거래대금 부족 '+counts.illiquid+' · 이미 상승 '+counts.extended+' · 최초 조건 미달 '+counts.quiet+' · API 오류 '+errors+'종목</p>';
 }
 const SERVER_URL='https://api.github.com/repos/hnoni777/upbit-signal-lab/contents/data/server-state.json?ref=server-data';
-let lastServer=null;
+let lastServer=null,lastSeenCompletedAt=null,lastLookupAt=0,unchanged=false;
 function serverPerformance(state){
  const lines=['<strong>'+(state.analysisVersion===54?'v54 상세 조건으로 새로 기록한 신호 후 30분 결과':'이전 버전의 신호 후 30분 결과')+'</strong>'];
  for(const [stage,label] of [['watch','조기 관심'],['confirmed','돌파 확인']]){
@@ -46,13 +46,13 @@ function serverPerformance(state){
 }
 function paintServer(state){
  if(!state.snapshot){$('status').textContent='서버 첫 분석 대기';$('progress').textContent='서버가 첫 전체 시장 분석을 진행합니다. 화면을 닫아도 작업은 계속됩니다.';return;}
- const snapshot=state.snapshot,age=Date.now()-snapshot.completedAt,delayed=age>10*60000||snapshot.stale;
+ const snapshot=state.snapshot,age=Date.now()-snapshot.completedAt,delayed=age>7*60000||snapshot.stale;
  render(snapshot.candidates,snapshot.counts,snapshot.cutoff,snapshot.counts.errors);
  $('scanned').textContent=snapshot.counts.requested;$('compared').textContent=snapshot.counts.valid;
  $('samples').textContent=snapshot.candidates.filter(r=>r.detail?.status!=='weakening').length;
  $('negatives').textContent=snapshot.candidates.filter(r=>r.detail?.status==='weakening').length;
- $('status').textContent=delayed?'서버 결과 지연 · 시각 확인':snapshot.counts.errors?'서버 감시 · 일부 조회 실패':'서버 감시 결과';
- $('progress').textContent='서버 분석 완료 '+stamp(snapshot.completedAt)+' · 봉 기준 '+stamp(snapshot.cutoff)+' · '+snapshot.counts.requested+'종목 요청 / '+snapshot.counts.valid+'종목 유효 / 오류 '+snapshot.counts.errors+'종목 · 상세 제외 '+(snapshot.excluded||0)+'종목 / 재조회 오류 '+(snapshot.refreshErrors||0)+'종목 · 서버 누적 '+state.runCount+'회 · 5분 간격 예약(실행 지연 가능)'+(delayed?' · 오래된 결과입니다. 현재 진입 신호로 보지 마세요.':'')+' · 이 화면 갱신 '+stamp(Date.now());
+ $('status').textContent=delayed?'서버 새 분석 지연':unchanged?'새 분석 결과 없음':snapshot.counts.errors?'서버 감시 · 일부 조회 실패':'새 서버 분석 반영';
+ $('progress').textContent='서버 분석 완료 '+stamp(snapshot.completedAt)+' · 봉 기준 '+stamp(snapshot.cutoff)+' · '+snapshot.counts.requested+'종목 요청 / '+snapshot.counts.valid+'종목 유효 / 오류 '+snapshot.counts.errors+'종목 · 상세 제외 '+(snapshot.excluded||0)+'종목 / 재조회 오류 '+(snapshot.refreshErrors||0)+'종목 · 서버 누적 '+state.runCount+'회 · '+(state.lastScheduledAt?'예약 실행 확인됨':'예약 자동 실행은 아직 확인되지 않음')+' · 5분 간격 예약(실행 지연 가능)'+(delayed?' · 오래된 결과입니다. 현재 진입 신호로 보지 마세요.':'')+' · 서버 자료 나이 '+Math.max(0,Math.floor(age/60000))+'분 · 조회 시각 '+stamp(lastLookupAt||Date.now())+(unchanged?' · 직전 조회와 같은 서버 결과입니다.':'' );
  $('validation').textContent='휴대폰 화면과 관계없이 서버가 분석·기록합니다. 예약 실행은 정각을 보장하지 않으며 1·3·5·15분 흐름과 후보 재확인을 함께 봅니다. 예측 성능은 아직 검증되지 않았으며 이전 버전 기록과 v54 집계를 구분합니다.';
  serverPerformance(state);
 }
@@ -65,15 +65,18 @@ async function loadServer(){
   const payload=await response.json();
   const state=payload.schema===52?payload:JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(payload.content.replace(/\s/g,'')),c=>c.charCodeAt(0))));
   if(state.schema!==52||!state.totals||!Array.isArray(state.history))throw Error('서버 결과 형식 오류');
+  unchanged=lastSeenCompletedAt!==null&&lastSeenCompletedAt===state.completedAt;
+  lastSeenCompletedAt=state.completedAt;lastLookupAt=Date.now();
   lastServer=state;paintServer(state);
  }catch(e){
   if(lastServer)paintServer(lastServer);
   $('status').textContent='서버 결과 조회 실패';$('progress').textContent='서버 결과를 가져오지 못했습니다: '+e.message+' · 화면의 결과가 있다면 이전 자료입니다. 서버 마지막 완료 시각을 확인해 주세요.';
  }finally{busy=false;if($('auto').checked)timer=setTimeout(loadServer,300000);}
 }
+setInterval(()=>{if(lastServer&&!document.hidden)paintServer(lastServer);},30000);
 $('start').onclick=loadServer;$('refresh').onclick=loadServer;
 $('auto').onchange=()=>{clearTimeout(timer);timer=null;if($('auto').checked&&!busy)loadServer();};
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!busy)loadServer();});
-$('status').textContent='서버 결과 연결 중';
+$('status').textContent='서버 결과 확인 중';
 loadServer();
 })();
