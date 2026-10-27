@@ -46,8 +46,8 @@ function serverPerformance(state){
  $('forward').innerHTML=lines.join('');
 }
 function recommendations(state){
- const result=window.CandidateRecommendations.select(state.snapshot,Date.now(),lastLoadFailed);
- const intro='<p>단타용으로 먼저 살펴볼 후보를 최대 3개 고릅니다. 고정 조건을 비교한 결과이며, 매수 지시·성공 확률·검증된 수익률이 아닙니다.</p>';
+ const result=window.CandidateRecommendations.select(state.snapshot,Date.now(),lastLoadFailed,state.learning?.champion||null);
+ const intro='<p>정렬 기준: '+(state.learning?.champion?'시간순 비교 기준을 통과한 학습 모델':'기존 고정 규칙')+'</p><p>단타용으로 먼저 살펴볼 후보를 최대 3개 고릅니다. 고정 조건을 비교한 결과이며, 매수 지시·성공 확률·검증된 수익률이 아닙니다.</p>';
  if(!result.picks.length){
   $('recommendations').innerHTML=intro+'<p><strong>지금은 추천 보류</strong> · '+esc(result.hold)+'</p>'+Object.entries(result.rejected).map(([reason,count])=>'<small>'+esc(reason)+' '+count+'종목</small>').join(' · ');return;
  }
@@ -56,8 +56,14 @@ function recommendations(state){
   return '<article class="item recommendation"><span class="phase '+d.status+'">'+(i+1)+'순위 · '+labels[d.status]+'</span><h3>'+esc(r.name)+' <small>'+esc(r.market)+'</small></h3><p>왜 먼저 보는가</p><ul>'+r.recommendation.reasons.map(reason=>'<li>'+esc(reason)+'</li>').join('')+'</ul><p>최근 3분 '+num(d.returns[3])+'% · 15분 '+num(d.returns[15])+'% · BTC 대비 '+num(d.relativeBtc15)+'%p · 거래 '+num(d.recentRatio)+'배</p><p class="risk">'+r.recommendation.cautions.map(esc).join(' ')+'</p><p><strong>확인할 것:</strong> 실제 거래소의 현재 1분봉·호가에서 신호 이후 되밀리지 않았는지 확인하세요. 서버 자료와 현재 가격은 다를 수 있습니다.</p><small>상세 봉 기준 '+stamp(d.cutoff)+' · 서버 완료 '+stamp(state.snapshot.completedAt)+'</small></article>';
  }).join('');
 }
+function learningPanel(state){
+ const l=state.learning;if(!l){$('learning').innerHTML='<p>학습용 기록 수집을 준비하고 있습니다. 현재는 기존 고정 규칙으로 비교합니다.</p>';return;}
+ const statuses={collecting:'학습 자료 수집 중',insufficient_classes:'성공·실패 표본 추가 필요',challenger_rejected:'새 모델의 비교 성과 미달 · 기존 방식 유지',fresh_holdout_needed:'새로운 미사용 검증 기간 대기',holdout_rejected:'새 모델의 이후 기간 성과 미달 · 기존 방식 유지',promoted:'시간순 비교 기준 통과 · 새 순위 모델 적용',rolled_back:'최근 성과 저하 · 고정 방식으로 복귀'};
+ $('learning').innerHTML='<p><strong>'+esc(statuses[l.status]||l.status)+'</strong></p><p>현재 정렬: '+(l.champion?'시간순 비교를 통과한 학습 모델 '+esc(l.champion.id):'기존 고정 규칙')+'</p><p>보관 비교 표본 '+l.observations+'건 · 누적 결과 판정 '+l.resolved+'건 · 보관 중 추천 표본 '+l.recommended+'건 / 평가 완료 '+l.recommendedEvaluated+'건</p>'+(l.evidence?'<p>첫 학습 최소 기준: 결과 '+l.evidence.resolved+'/'+l.evidence.required+'건 · 수집 '+l.evidence.days+'/'+l.evidence.requiredDays+'일. 이후 별도의 미사용 기간 비교도 통과해야 적용됩니다.</p>':'')+'<p>성공·실패 당시 지표로 순위를 학습합니다. 하루 한 번 갱신을 시도하며, 같은 자료에서 잘 맞았다는 이유만으로 교체하지 않습니다. 설정한 비교 기준의 통과는 미래 수익이나 지속적인 개선을 보장하지 않습니다.</p>';
+}
 function paintServer(state){
  if(!state.snapshot){$('status').textContent='서버 첫 분석 대기';$('progress').textContent='서버가 첫 전체 시장 분석을 진행합니다. 화면을 닫아도 작업은 계속됩니다.';return;}
+ learningPanel(state);
  recommendations(state);
  const snapshot=state.snapshot,age=Date.now()-snapshot.completedAt,delayed=age>7*60000||snapshot.stale;
  render(snapshot.candidates,snapshot.counts,snapshot.cutoff,snapshot.counts.errors);

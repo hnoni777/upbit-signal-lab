@@ -2,6 +2,7 @@
 const fs=require('node:fs');
 const S=require('../sequence.js');
 const D=require('../detail.js');
+const L=require('../learner.cjs');
 const MINUTE=60000, API=process.env.UPBIT_API_BASE||'https://api.upbit.com/v1';
 const emptyStats=()=>({evaluated:0,target:0,stop:0,ambiguous:0,timeout:0,missing:0,netTotal:0});
 function initial(){return {schema:52,runCount:0,history:[],totals:{watch:emptyStats(),confirmed:emptyStats()}};}
@@ -17,7 +18,7 @@ function recordOutcome(state,record,outcome){
  if(outcome){record.outcome=outcome;stats.evaluated++;stats[outcome.result]++;stats.netTotal+=outcome.net;}
  else {record.expired=true;stats.missing++;}
 }
-async function scan(previous,{get,now=Date.now,onProgress=()=>{}}){
+async function scan(previous,{get,now=Date.now,onProgress=()=>{},learning=null}){
  const state=structuredClone(previous),startedAt=now(),cutoff=Math.floor(startedAt/MINUTE)*MINUTE;
  state.detailTotals??={watch:emptyStats(),confirmed:emptyStats()};
  const previousRows=new Map((previous.snapshot?.candidates||[]).filter(r=>cutoff-r.cutoff<=30*MINUTE).map(r=>[r.market,r]));
@@ -32,6 +33,15 @@ async function scan(previous,{get,now=Date.now,onProgress=()=>{}}){
   try{
    const rows=await get('/candles/minutes/1?market='+encodeURIComponent(m.market)+'&count=200&to='+encodeURIComponent(new Date(cutoff).toISOString()));
    barCache.set(m.market,rows);
+   if(learning){
+    L.settle(learning,m.market,rows,cutoff);
+    for(const pending of [...learning.observations,...(learning.recommendations||[])].filter(r=>r.market===m.market&&!r.outcome&&!r.missing&&r.entryCutoff+30*MINUTE<=cutoff)){
+     const end=pending.entryCutoff+30*MINUTE;
+     const archived=await get('/candles/minutes/1?market='+encodeURIComponent(m.market)+'&count=80&to='+encodeURIComponent(new Date(end).toISOString()));
+     L.settle(learning,m.market,archived,end);
+     if(!pending.outcome&&cutoff-end>24*60*MINUTE){pending.missing=true;learning.stats.missing++;}
+    }
+   }
    for(const record of state.history.filter(r=>r.market===m.market&&!r.outcome&&!r.expired&&r.entryCutoff+30*MINUTE<=cutoff)){
     let result=S.outcome(rows,record.entryCutoff,cutoff);
     if(!result){
@@ -105,6 +115,7 @@ async function scan(previous,{get,now=Date.now,onProgress=()=>{}}){
  state.quoteSource=API==='https://api.upbit.com/v1'?'upbit-direct':'custom';
  state.analysisVersion=54;
  state.snapshot={cutoff,detailCutoff,startedAt,completedAt,stale,counts,errorMarkets,refreshErrors,excluded,candidates:detailed.sort((a,b)=>b.detail.quality-a.detail.quality)};
+ if(learning){L.update(learning,completedAt);L.observe(learning,state.snapshot);L.prune(learning);state.learning=L.summary(learning);}
  state.schedule={requestedMinutes:5,provider:'GitHub Actions',exactTiming:false};
  return state;
 }
@@ -123,12 +134,15 @@ function makeGetter(){
 }
 async function main(){
  const input=process.argv[2]||'data/server-state.json',output=process.argv[3]||input;
- const state=await scan(readState(input),{get:makeGetter(),onProgress:p=>{if(p.finished%50===0||p.finished===p.total)console.log('Scanned',p.finished,'/',p.total);}});
+ const learningPath='data/learning.json',learning=fs.existsSync(learningPath)?JSON.parse(fs.readFileSync(learningPath,'utf8')):L.state();
+ if(learning.version!==1||!Array.isArray(learning.observations))throw Error('Invalid learning archive; refusing to replace it');
+ const state=await scan(readState(input),{learning,get:makeGetter(),onProgress:p=>{if(p.finished%50===0||p.finished===p.total)console.log('Scanned',p.finished,'/',p.total);}});
  state.lastTrigger=process.env.GITHUB_EVENT_NAME||'manual';
  if(state.lastTrigger==='schedule')state.lastScheduledAt=state.completedAt;
  if(process.env.RUN_CHAINED==='true')state.lastAutonomousAt=state.completedAt;
  state.schedule={requestedMinutes:5,provider:'GitHub Actions continuation',exactTiming:false};
  fs.mkdirSync(require('node:path').dirname(output),{recursive:true});
+ fs.writeFileSync(learningPath+'.tmp',JSON.stringify(learning));fs.renameSync(learningPath+'.tmp',learningPath);
  fs.writeFileSync(output+'.tmp',JSON.stringify(state));fs.renameSync(output+'.tmp',output);
  console.log(JSON.stringify({runCount:state.runCount,cutoff:state.snapshot.cutoff,counts:state.snapshot.counts,watch:state.snapshot.candidates.filter(r=>r.signal.stage==='watch').length,confirmed:state.snapshot.candidates.filter(r=>r.signal.stage==='confirmed').length}));
 }

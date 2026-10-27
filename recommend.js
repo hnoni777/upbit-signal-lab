@@ -1,7 +1,18 @@
 'use strict';
 (function(root){
  const MAX_AGE=7*60000,stable=new Set(['USDT','USDC','DAI','USDE','USD1','USDS','FDUSD','TUSD','PYUSD','USDD']);
- function select(snapshot,now=Date.now(),sourceFailed=false){
+ function features(row){
+  const d=row.detail;if(!d)return null;
+  const x=[d.returns?.[1],d.returns?.[3],d.returns?.[5],d.returns?.[15],d.relativeBtc15,Math.log1p(d.recentRatio),d.pullback,d.atrPct,d.extensionAtr,d.active15/15,d.aboveTrend?1:0,d.hold?1:0];
+  return x.every(Number.isFinite)?x.map(v=>Math.max(-20,Math.min(20,v))):null;
+ }
+ function learnedScore(model,row){
+  const x=features(row);
+  if(!x||!model||!Array.isArray(model.weights)||model.weights.length!==x.length+1||model.mean?.length!==x.length||model.scale?.length!==x.length||!model.weights.every(Number.isFinite)||!model.mean.every(Number.isFinite)||!model.scale.every(v=>Number.isFinite(v)&&v>0))return null;
+  const z=model.weights[0]+x.reduce((s,v,j)=>s+(v-model.mean[j])/model.scale[j]*model.weights[j+1],0);
+  return 1/(1+Math.exp(-Math.max(-30,Math.min(30,z))));
+ }
+ function select(snapshot,now=Date.now(),sourceFailed=false,model=null){
   if(!snapshot)return {picks:[],hold:'서버 결과를 불러오는 중입니다.',rejected:{}};
   if(sourceFailed)return {picks:[],hold:'자료 재조회에 실패해 우선 검토 후보를 보류합니다.',rejected:{}};
   if(!Number.isFinite(snapshot.completedAt)||now-snapshot.completedAt>MAX_AGE||snapshot.completedAt>now+30000||snapshot.stale)return {picks:[],hold:'서버 자료가 오래됐거나 시각을 확인할 수 없어 선정을 보류합니다.',rejected:{}};
@@ -30,10 +41,10 @@
    if(d.atrPct>=1)cautions.push('최근 분 단위 가격 변동폭이 큽니다.');
    eligible.push({...row,recommendation:{reasons,cautions}});
   }
-  eligible.sort((a,b)=>(b.detail.status==='maintaining')-(a.detail.status==='maintaining')||(b.detail.quality||0)-(a.detail.quality||0)||String(a.market).localeCompare(String(b.market)));
+  eligible.sort((a,b)=>(model?(learnedScore(model,b)??0)-(learnedScore(model,a)??0):0)||(b.detail.status==='maintaining')-(a.detail.status==='maintaining')||(b.detail.quality||0)-(a.detail.quality||0)||String(a.market).localeCompare(String(b.market)));
   const seen=new Set();
   const unique=eligible.filter(r=>{if(seen.has(r.market))return false;seen.add(r.market);return true;});
   return {picks:unique.slice(0,3),hold:unique.length?'':'거래 지속과 가격 흐름을 함께 충족하는 후보가 없어 지금은 선정을 보류합니다.',rejected};
  }
- const api={select};if(typeof module!=='undefined'&&module.exports)module.exports=api;else root.CandidateRecommendations=api;
+ const api={select,features,learnedScore};if(typeof module!=='undefined'&&module.exports)module.exports=api;else root.CandidateRecommendations=api;
 })(typeof globalThis!=='undefined'?globalThis:this);

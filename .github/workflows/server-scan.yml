@@ -13,6 +13,8 @@ on:
       - scripts/continue_scan.cjs
       - sequence.js
       - detail.js
+      - learner.cjs
+      - recommend.js
       - .github/workflows/server-scan.yml
       - .github/server-control.json
 permissions:
@@ -41,8 +43,11 @@ jobs:
       - name: Load durable server state
         if: steps.control.outputs.enabled == 'true'
         run: |
-          git fetch origin server-data
+          git fetch --depth=1 origin server-data
           git show origin/server-data:data/server-state.json > data/server-state.json
+          if git cat-file -e origin/server-data:data/learning.json 2>/dev/null; then
+            git show origin/server-data:data/learning.json > data/learning.json
+          fi
       - name: Analyze all current KRW pairs
         if: steps.control.outputs.enabled == 'true'
         env:
@@ -54,10 +59,11 @@ jobs:
           git worktree add --detach "$RUNNER_TEMP/server-publish" origin/server-data
           mkdir -p "$RUNNER_TEMP/server-publish/data"
           cp data/server-state.json "$RUNNER_TEMP/server-publish/data/server-state.json"
+          cp data/learning.json "$RUNNER_TEMP/server-publish/data/learning.json"
           cd "$RUNNER_TEMP/server-publish"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add data/server-state.json
+          git add data/server-state.json data/learning.json
           if ! git diff --cached --quiet; then
             git commit -m 'server: update all-market snapshot and observations'
             git push origin HEAD:server-data
