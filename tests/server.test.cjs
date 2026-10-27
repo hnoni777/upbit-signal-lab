@@ -42,7 +42,7 @@ test('default app reads server results without starting a device-side market sca
  vm.runInNewContext(fs.readFileSync('app.js','utf8'),context);
  await new Promise(setImmediate);
  await el('start').onclick();
- assert.ok(urls.every(url=>url.includes('/contents/data/server-state.json?ref=server-data')));
+ assert.ok(urls.every(url=>url.includes('/server-data/data/server-state.json')||url.includes('/contents/data/server-state.json?ref=server-data')));
  assert.equal(el('scanned').textContent,6);assert.equal(el('samples').textContent,6);
  assert.match(el('status').textContent,/새 분석 결과 없음/);assert.match(el('progress').textContent,/같은 서버 결과/);assert.match(el('forward').innerHTML,/v54 상세 조건/);
  state.snapshot.completedAt=cutoff-20*MIN;await el('refresh').onclick();assert.match(el('status').textContent,/지연/);

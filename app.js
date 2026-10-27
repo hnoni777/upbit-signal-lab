@@ -59,12 +59,26 @@ function paintServer(state){
 async function loadServer(){
  if(busy)return;busy=true;clearTimeout(timer);timer=null;
  try{
-  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),15000);
-  let response;try{response=await fetch(SERVER_URL+'&t='+Math.floor(Date.now()/60000),{cache:'no-store',signal:controller.signal});}finally{clearTimeout(timeout);}
-  if(!response.ok)throw Error('결과 조회 '+response.status);
-  const payload=await response.json();
-  const state=payload.schema===52?payload:JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(payload.content.replace(/\s/g,'')),c=>c.charCodeAt(0))));
-  if(state.schema!==52||!state.totals||!Array.isArray(state.history))throw Error('서버 결과 형식 오류');
+  async function fetchState(url){
+   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),15000);
+   try{
+    const response=await fetch(url,{cache:'no-store',signal:controller.signal});
+    if(!response.ok)throw Error('결과 조회 '+response.status);
+    const payload=await response.json();
+    const data=payload.schema===52?payload:JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(payload.content.replace(/\s/g,'')),c=>c.charCodeAt(0))));
+    if(data.schema!==52||!data.totals||!Array.isArray(data.history))throw Error('서버 결과 형식 오류');
+    return data;
+   }finally{clearTimeout(timeout);}
+  }
+  const raw='https://raw.githubusercontent.com/hnoni777/upbit-signal-lab/server-data/data/server-state.json?t='+Date.now();
+  let state;
+  try{
+   state=await fetchState(raw);
+   // Old edge-cache data may be checked against the current GitHub file API.
+   if(Date.now()-state.completedAt>7*60000){try{const current=await fetchState(SERVER_URL+'&t='+Date.now());if(current.completedAt>state.completedAt)state=current;}catch(e){}}
+  }catch(rawError){state=await fetchState(SERVER_URL+'&t='+Date.now());}
+  // Never replace an already-seen snapshot with an older cached copy.
+  if(lastServer?.completedAt>state.completedAt)state=lastServer;
   unchanged=lastSeenCompletedAt!==null&&lastSeenCompletedAt===state.completedAt;
   lastSeenCompletedAt=state.completedAt;lastLookupAt=Date.now();
   lastServer=state;paintServer(state);
