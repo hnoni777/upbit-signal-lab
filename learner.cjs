@@ -17,7 +17,6 @@ function observe(learning,snapshot){
   if(learning.observations.some(r=>r.market===row.market&&r.slot===slot))continue;
   // Eligibility is evaluated independently: do not label all non-TOP3 coins as failures.
   const eligible=R.select({...snapshot,candidates:[row]},snapshot.completedAt).picks.length===1;
-  if(!eligible)continue;
   const pred=learning.champion?predict(learning.champion,x):null;
   learning.observations.push({id:row.market+'|'+slot,market:row.market,slot,x,eligible,recommended:ids.has(row.market),quality:row.detail.quality,status:row.detail.status,observedAt:snapshot.completedAt,entryCutoff:Math.floor(snapshot.completedAt/MINUTE)*MINUTE+MINUTE,modelPrediction:pred,modelId:learning.champion?.id||'fixed-v55'});
  }
@@ -94,5 +93,9 @@ function update(learning,now=Date.now()){
  learning.promotions.push({id,at:now,test:score,incumbent});learning.status='promoted';
 }
 function summary(l){return {version:VERSION,status:l.status,observations:l.observations.length,resolved:l.stats.resolved,recommended:(l.recommendations||[]).length,recommendedEvaluated:(l.recommendations||[]).filter(r=>r.outcome).length,champion:l.champion,evidence:l.evidence||null,lastEvaluation:l.lastEvaluation||null,promotions:l.promotions.slice(-10),rollbacks:(l.rollbacks||[]).slice(-10),note:'조건을 통과한 후보 사이의 순위 학습입니다. 확률 보정과 실제 체결 수익 검증은 아닙니다.'};}
-function prune(l){l.recommendations=(l.recommendations||[]).filter(r=>!r.outcome&&!r.missing).concat((l.recommendations||[]).filter(r=>r.outcome||r.missing).slice(-20000));l.observations=l.observations.filter(r=>!r.outcome&&!r.missing).concat(l.observations.filter(r=>r.outcome||r.missing).slice(-50000)).sort((a,b)=>a.observedAt-b.observedAt);}
+function prune(l){
+ l.recommendations=(l.recommendations||[]).filter(r=>!r.outcome&&!r.missing).concat((l.recommendations||[]).filter(r=>r.outcome||r.missing).slice(-20000));
+ const pending=l.observations.filter(r=>!r.outcome&&!r.missing),done=l.observations.filter(r=>r.outcome||r.missing);
+ l.observations=[...pending,...done.filter(r=>r.eligible).slice(-50000),...done.filter(r=>!r.eligible).slice(-5000)].sort((a,b)=>a.observedAt-b.observedAt);
+}
 module.exports={prune,state,observe,settle,train,predict,evaluate,update,summary,features};
