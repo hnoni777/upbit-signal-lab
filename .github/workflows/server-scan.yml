@@ -1,0 +1,44 @@
+name: Background market scanner
+on:
+  schedule:
+    - cron: '2-59/5 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - scripts/server_scan.cjs
+      - sequence.js
+      - .github/workflows/server-scan.yml
+permissions:
+  contents: write
+concurrency:
+  group: upbit-server-scan
+  cancel-in-progress: false
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify detector and server transitions
+        run: node --test tests/sequence.test.cjs tests/server.test.cjs
+      - name: Load durable server state
+        run: |
+          git fetch origin server-data
+          git show origin/server-data:data/server-state.json > data/server-state.json
+      - name: Analyze all current KRW pairs
+        run: node scripts/server_scan.cjs data/server-state.json data/server-state.json
+      - name: Persist results without rebuilding the app
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/server-publish" origin/server-data
+          mkdir -p "$RUNNER_TEMP/server-publish/data"
+          cp data/server-state.json "$RUNNER_TEMP/server-publish/data/server-state.json"
+          cd "$RUNNER_TEMP/server-publish"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/server-state.json
+          git commit -m 'server: update all-market snapshot and observations'
+          git push origin HEAD:server-data

@@ -10,5 +10,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: node --test tests/sequence.test.cjs
+      - run: node --test tests/*.test.cjs
       - run: node --check app.js && node --check sequence.js && node --check scripts/replay_sequence.cjs
