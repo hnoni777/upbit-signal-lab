@@ -1,7 +1,7 @@
 'use strict';
 const fs=require('node:fs');
 const S=require('../sequence.js');
-const MINUTE=60000, API=process.env.UPBIT_API_BASE||'https://upbit-signal-proxy.parkdam6.workers.dev/v1';
+const MINUTE=60000, API=process.env.UPBIT_API_BASE||'https://api.upbit.com/v1';
 const emptyStats=()=>({evaluated:0,target:0,stop:0,ambiguous:0,timeout:0,missing:0,netTotal:0});
 function initial(){return {schema:52,runCount:0,history:[],totals:{watch:emptyStats(),confirmed:emptyStats()}};}
 function readState(path){
@@ -60,6 +60,7 @@ async function scan(previous,{get,now=Date.now,onProgress=()=>{}}){
  const completed=state.history.filter(r=>r.outcome||r.expired).slice(-1000),pending=state.history.filter(r=>!r.outcome&&!r.expired);
  state.history=[...completed,...pending].sort((a,b)=>a.cutoff-b.cutoff);
  state.runCount++;state.completedAt=completedAt;
+ state.quoteSource=API==='https://api.upbit.com/v1'?'upbit-direct':'custom';
  state.snapshot={cutoff,startedAt,completedAt,stale,counts,errorMarkets,candidates:candidates.sort((a,b)=>b.signal.f.score-a.signal.f.score)};
  state.schedule={requestedMinutes:5,provider:'GitHub Actions',exactTiming:false};
  return state;

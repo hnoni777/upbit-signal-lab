@@ -40,6 +40,7 @@ test('default app reads server results without starting a device-side market sca
  class Clock extends Date{constructor(...args){super(...(args.length?args:[cutoff+20000]));}static now(){return cutoff+20000;}}
  const context={window:{SequenceSignal:S},document:{getElementById:el,addEventListener(){}},Date:Clock,AbortController,localStorage:{getItem:()=>null,setItem(){}},setTimeout:()=>1,clearTimeout(){},fetch:async url=>{urls.push(url);return {ok:true,json:async()=>state};}};
  vm.runInNewContext(fs.readFileSync('app.js','utf8'),context);
+ await new Promise(setImmediate);
  await el('start').onclick();
  assert.ok(urls.every(url=>url.includes('/server-data/data/server-state.json')));
  assert.equal(el('scanned').textContent,6);assert.equal(el('samples').textContent,6);

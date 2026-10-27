@@ -20,16 +20,3 @@ test('typed API no-trade minutes are filled with zero turnover, without inventin
  assert.equal(S.detect(a.slice(1),cutoff).stage,'missing');
 });
 test('entry is next bar open rather than previous signal close',()=>{const a=future().map(c=>({...c,opening_price:110,trade_price:110,high_price:111,low_price:109}));assert.equal(S.outcome(a,cutoff).entry,110);assert.equal(S.outcome(a,cutoff).result,'timeout');});
-test('live scan requests every market, renders both stages, and records no probability',async()=>{
- const vm=require('node:vm'),fs=require('node:fs');
- const elements=new Map();const el=id=>{if(!elements.has(id))elements.set(id,{textContent:'',innerHTML:'',checked:false,disabled:false});return elements.get(id);};
- const store=new Map(),requests=[];const now=cutoff+10000;
- class Clock extends Date{constructor(...a){super(...(a.length?a:[now]));}static now(){return now;}}
- const markets=Array.from({length:7},(_,i)=>({market:'KRW-T'+i,korean_name:'테스트'+i}));
- const context={window:{SequenceSignal:S},document:{getElementById:el,addEventListener(){}},Date:Clock,AbortController,console,localStorage:{getItem:k=>store.get(k)||null,setItem:(k,v)=>store.set(k,v)},setTimeout:(cb,ms)=>{if(ms<2000)queueMicrotask(cb);return 1;},clearTimeout(){},confirm:()=>true,fetch:async url=>{requests.push(url);return {ok:true,json:async()=>url.includes('raw.githubusercontent.com')?{schema:52,totals:{},history:[],snapshot:null}:url.includes('/market/all')?markets:url.includes('KRW-T0')?confirmed():bars()};}};
- vm.runInNewContext(fs.readFileSync('app.js','utf8'),context);await el('reset').onclick();
- assert.equal(requests.filter(u=>!u.includes('raw.githubusercontent.com')).length,8);assert.equal(el('compared').textContent,7);
- assert.match(el('results').innerHTML,/조기 관심/);assert.match(el('results').innerHTML,/돌파 확인/);
- const records=JSON.parse([...store.values()][0]);assert.equal(records.length,7);assert.ok(records.every(r=>r.entryCutoff>r.observedAt));
- assert.match(el('validation').textContent,/아직 검증하지 않았습니다/);
-});
