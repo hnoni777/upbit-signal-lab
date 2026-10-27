@@ -1,167 +1,101 @@
 'use strict';
-/* v50: all-market three-phase observations with explicit pattern evidence and diagnostics */
+/* v51: causal minute-sequence hypotheses and local forward observation. */
 (()=>{
-const API='https://upbit-signal-proxy.parkdam6.workers.dev/v1',KEY='usl-24h-v43-dataset',LIMIT=35,EVENT_LIMIT=420,CONTROL_LIMIT=140,STEP=900000;
-const $=x=>document.getElementById(x),sleep=ms=>new Promise(r=>setTimeout(r,ms)),esc=x=>String(x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let busy=false,markets=[],tickers=[],archiveSamples=[],archiveMarkets=0,archiveStatus='백그라운드 수집 대기';
-async function get(path){for(let i=0;i<3;i++){const a=new AbortController(),tm=setTimeout(()=>a.abort(),20000);try{const r=await fetch(API+path,{signal:a.signal});if(!r.ok)throw Error('API '+r.status);const d=await r.json();if(!Array.isArray(d))throw Error('API 응답 오류');return d}catch(e){if(i===2)throw e;await sleep(600*(i+1))}finally{clearTimeout(tm)}}}
-const epoch=s=>Date.parse(s.endsWith('Z')?s:s+'Z');
-const order=a=>a.sort((x,y)=>epoch(x.candle_date_time_utc)-epoch(y.candle_date_time_utc));
-const dateKst=(ms)=>new Date(ms+32400000).toISOString().slice(0,10);
-const kstHour=(ms)=>new Date(ms+32400000).toISOString().slice(11,16);
-const dayUtc=(d,hh,mm)=>Date.parse(d+'T00:00:00Z')+(hh*60+mm-540)*60000;
-const blank=()=>({v:43,plan:43,cohortChecked:[],done:[],candidates:[],checked:[],samples:[],completed:false,created:Date.now()});
-function read(){try{const x=JSON.parse(localStorage.getItem(KEY)||'null');if(x?.v!==43||!Array.isArray(x.samples)||!Array.isArray(x.done)||!Array.isArray(x.checked))return blank();if(!Array.isArray(x.cohortChecked))x.cohortChecked=[];if(x.plan!==43){x.plan=43;x.completed=false}return x}catch(e){return blank()}}
-function save(d){try{localStorage.setItem(KEY,JSON.stringify(d));return true}catch(e){$('progress').textContent='저장 공간이 부족합니다. 학습 데이터 저장 실패';return false}}
-function stats(d){$('scanned').textContent=d.done.length;$('samples').textContent=d.samples.filter(x=>x.y===1).length;$('negatives').textContent=d.samples.filter(x=>x.y===0).length;$('compared').textContent='0'}
-function vector(rows){
- if(rows.length<97)return null;const a=rows.slice(-97),first=epoch(a[0].candle_date_time_utc);
- if(a.some((c,i)=>epoch(c.candle_date_time_utc)!==first+i*STEP))return null;
- const price=i=>Number(a.at(i).trade_price),mean=x=>x.reduce((s,c)=>s+Number(c.candle_acc_trade_price||0),0)/x.length;
- const base=mean(a.slice(0,80)),vol4=mean(a.slice(-4)),vol12=mean(a.slice(-12)),high=Math.max(...a.slice(-24).map(c=>Number(c.high_price))),low=Math.min(...a.slice(-24).map(c=>Number(c.low_price)));
- const buys=a.slice(-12).filter(c=>Number(c.trade_price)>Number(c.opening_price)).reduce((s,c)=>s+Number(c.candle_acc_trade_price||0),0),total=a.slice(-12).reduce((s,c)=>s+Number(c.candle_acc_trade_price||0),0);
- const f=[100*(price(-1)/price(-5)-1),100*(price(-1)/price(-13)-1),100*(price(-1)/price(-25)-1),100*(price(-1)/price(0)-1),Math.log1p(vol4/Math.max(base,1)),Math.log1p(vol12/Math.max(base,1)),100*(high/Math.max(low,1e-10)-1),100*(price(-1)/high-1),total?buys/total:.5];
- return f.every(Number.isFinite)?f:null;
-}
-const scales=[2,4,7,15,.7,.7,8,6,.3];
-const dist=(a,b)=>Math.sqrt(a.reduce((s,v,i)=>s+Math.min(25,((v-b[i])/scales[i])**2),0)/a.length);
-async function marketData(){if(!markets.length)markets=(await get('/market/all?isDetails=false')).filter(m=>m.market.startsWith('KRW-'));const t=[];for(let i=0;i<markets.length;i+=65)t.push(...await get('/ticker?markets='+encodeURIComponent(markets.slice(i,i+65).map(x=>x.market).join(','))));tickers=t.map(t=>({...t,name:markets.find(m=>m.market===t.market)?.korean_name||t.market}));$('status').textContent='API 연결'}
-async function daily(market){let to='',map=new Map();for(let i=0;i<4;i++){const a=await get('/candles/days?market='+encodeURIComponent(market)+'&count=200'+(to?'&to='+encodeURIComponent(to):''));if(!a.length)break;for(const c of a)map.set(c.candle_date_time_utc,c);const next=a.at(-1).candle_date_time_utc+'Z';if(next===to||a.length<200)break;to=next;await sleep(150)}const cutoff=Date.now()-731*86400000;return [...map.values()].filter(c=>epoch(c.candle_date_time_utc)>cutoff&&epoch(c.candle_date_time_utc)<Date.now()-86400000)}
-const HOURS=[0,4,8,12,16,20];
-async function bars(market,date,hour){
- const cutoff=dayUtc(date,hour,0),end=new Date(cutoff+8*STEP).toISOString(),m=new Map();let cursor=end;
- for(let i=0;i<3;i++){const a=await get('/candles/minutes/15?market='+encodeURIComponent(market)+'&count=200&to='+encodeURIComponent(cursor));if(!a.length)break;for(const c of a)m.set(c.candle_date_time_utc,c);const next=a.at(-1).candle_date_time_utc+'Z';if(next===cursor||a.length<200)break;cursor=next;await sleep(140)}
- return order([...m.values()]);
-}
-function sample(market,name,date,hour,a){
- const cutoff=dayUtc(date,hour,0),end=cutoff+8*STEP,prev=a.filter(c=>epoch(c.candle_date_time_utc)<cutoff);
- if(!prev.length||epoch(prev.at(-1).candle_date_time_utc)!==cutoff-STEP)return null;
- const f=vector(prev);if(!f)return null;
- const future=a.filter(c=>epoch(c.candle_date_time_utc)>=cutoff&&epoch(c.candle_date_time_utc)<end);
- if(future.length!==8||future.some((c,i)=>epoch(c.candle_date_time_utc)!==cutoff+i*STEP))return null;
- const entry=Number(prev.at(-1).trade_price),peak=Math.max(...future.map(c=>Number(c.high_price))),trough=Math.min(...future.map(c=>Number(c.low_price))),gain=100*(peak/entry-1),drawdown=100*(trough/entry-1);
- const peakCandle=future.find(c=>Number(c.high_price)===peak),startCandle=future.find(c=>Number(c.high_price)>=entry*1.03);
- const rise=future.map(c=>({time:kstHour(epoch(c.candle_date_time_utc)),closePct:100*(Number(c.trade_price)/entry-1),highPct:100*(Number(c.high_price)/entry-1),turnover:Number(c.candle_acc_trade_price||0)}));
- return {market,name,date,hour,f,y:gain>=10?1:0,gain,drawdown,peakTime:kstHour(epoch(peakCandle.candle_date_time_utc)),onsetTime:startCandle?kstHour(epoch(startCandle.candle_date_time_utc)):null,rise};
-}
-function split(d){const a=d.samples.slice().sort((x,y)=>x.date.localeCompare(y.date));const dates=[...new Set(a.map(x=>x.date))];const boundary=dates[Math.floor(dates.length*.8)]||'9999';return {train:a.filter(x=>x.date<boundary),test:a.filter(x=>x.date>=boundary),boundary}}
-function classify(f,train){
- if(train.length<20)return null;
- const pos=train.filter(x=>x.y===1),neg=train.filter(x=>x.y===0);
- if(pos.length<5||neg.length<10)return null;
- // Balanced class neighborhoods prevent the majority class from overwhelming rare spikes.
- const k=7,neighbors=(arr)=>arr.map(x=>({x,d:dist(f,x.f)})).sort((a,b)=>a.d-b.d).slice(0,k);
- const p=neighbors(pos),n=neighbors(neg),weight=z=>1/(.25+z.d)**2;
- const density=a=>a.reduce((s,z)=>s+weight(z),0)/a.length;
- const pd=density(p),nd=density(n);
- const raw=pd/(pd+nd);
- const nearest=[...p,...n].sort((a,b)=>a.d-b.d)[0];
- return Number.isFinite(raw)?{raw,nearest,n:p.length+n.length}:null;
-}
-// Apply identical pre-spike gates to historical 08:30 inputs and live closed candles.
-function preSpike(f){return Array.isArray(f)&&f.every(Number.isFinite)}
-function validation(d){
- const {train,test,boundary}=split(d);
- const scored=test.filter(x=>preSpike(x.f)).map(x=>({x,p:classify(x.f,train)})).filter(x=>x.p);
- const byDay=new Map();
- for(const z of scored){const key=z.x.date+'|'+z.x.hour;if(!byDay.has(key))byDay.set(key,[]);byDay.get(key).push(z)}
- let picks=0,hits=0,baseHits=0,eligible=0,days=0,positiveDays=0;
- // Only days with at least 5 observed assets qualify as a TOP5 comparison.
- for(const rows of byDay.values()){
-  if(rows.length<5)continue;
-  days++;eligible+=rows.length;baseHits+=rows.filter(z=>z.x.y).length;
-  if(rows.some(z=>z.x.y))positiveDays++;
-  for(const z of rows.sort((a,b)=>b.p.raw-a.p.raw).slice(0,5)){picks++;hits+=z.x.y}
+const API='https://upbit-signal-proxy.parkdam6.workers.dev/v1',KEY='usl-sequence-v51-observations',S=window.SequenceSignal;
+const $=id=>document.getElementById(id),sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let busy=false,timer=null,history=[],storageOK=true;
+try{const raw=JSON.parse(localStorage.getItem(KEY)||'[]');history=Array.isArray(raw)?raw.filter(r=>r.version===51&&typeof r.market==='string'&&Number.isFinite(r.cutoff)&&['watch','confirmed'].includes(r.stage)):[];}catch(e){storageOK=false;}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(history));storageOK=true;}catch(e){storageOK=false;}}
+async function get(path){
+ for(let i=0;i<3;i++){
+  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),12000);
+  try{const r=await fetch(API+path,{signal:controller.signal,cache:'no-store'});if(!r.ok)throw Error('API '+r.status);const rows=await r.json();if(!Array.isArray(rows))throw Error('배열 응답 없음');return rows;}
+  catch(e){if(i===2)throw e;await sleep(800*(i+1));}finally{clearTimeout(timeout);}
  }
- const precision=picks?100*hits/picks:null,base=eligible?100*baseHits/eligible:null;
- const lift=precision!==null&&base>0?precision/base:null;
- const valid=train.filter(x=>x.y).length>=10&&test.filter(x=>x.y).length>=5&&days>=10&&picks>=50;
- $('validation').textContent='시간순 분리 검증 · 학습 '+train.length+'건 / 미래 검증 '+test.length+'건 (경계 '+boundary+') · 비교 가능 날짜·시간대 '+days+'개 · TOP5 적중 '+hits+'/'+picks+(precision===null?' (검증 불가)':' = '+precision.toFixed(1)+'%')+(base===null?'':' · 동일 날짜 전체 급등 '+base.toFixed(1)+'%')+(lift===null?'':' · 기준 대비 '+lift.toFixed(2)+'배')+(valid?' · 검증 표본 기준 충족':' · 검증 표본 부족');
- if(!days)$('validation').textContent+=' · 같은 날짜·시간대에 5종목 이상 과거 관측이 필요합니다';
- return {train,test,scored,precision,base,lift,valid,days};
 }
-async function learn(d){
- const chosen=tickers.filter(t=>Number(t.acc_trade_price_24h)>1e8).sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h).slice(0,LIMIT);
- for(const t of chosen){if(d.done.includes(t.market))continue;$('progress').textContent='2년 일봉 조사 '+(d.done.length+1)+'/'+chosen.length+' · '+t.market;
- try{const a=await daily(t.market);for(const c of a){const v=Number(c.high_price)/Number(c.opening_price),day=c.candle_date_time_utc.slice(0,10);if(v>=1.02&&Number(c.candle_acc_trade_price)>5e7)d.candidates.push({market:t.market,name:t.name,date:day})}d.done.push(t.market);save(d);stats(d)}catch(e){$('progress').textContent='일봉 실패 '+t.market+': '+e.message}await sleep(130)}
- const unique=[...new Map(d.candidates.map(x=>[x.market+'|'+x.date,x])).values()].sort((a,b)=>a.date.localeCompare(b.date));
- const dates=[...new Set(unique.map(e=>e.date))],cohortDates=[],slots=Math.min(18,dates.length);
- for(let i=0;i<slots;i++){const date=dates[Math.floor(i*(dates.length-1)/Math.max(1,slots-1))];if(!cohortDates.includes(date))cohortDates.push(date)}
- const cohortMarkets=chosen.slice(0,15),total=cohortDates.length*cohortMarkets.length*HOURS.length;let completed=0,errors=0;
- for(const date of cohortDates)for(const t of cohortMarkets)for(const hour of HOURS){
- const id=t.market+'|'+date+'|'+hour;completed++;if(d.checked.includes(id))continue;
- $('progress').textContent='24시간 학습 '+completed+'/'+total+' · '+date+' '+String(hour).padStart(2,'0')+':00 · '+t.market;
- try{const s=sample(t.market,t.name,date,hour,await bars(t.market,date,hour));if(s){const old=d.samples.findIndex(x=>x.market===s.market&&x.date===s.date&&x.hour===s.hour);if(old>=0)d.samples[old]=s;else d.samples.push(s)}d.checked.push(id);save(d);stats(d)}
- catch(e){errors++;$('progress').textContent='조회 실패 '+t.market+' '+date+': '+e.message}await sleep(150)}
- d.completed=chosen.every(t=>d.done.includes(t.market))&&cohortDates.every(date=>cohortMarkets.every(t=>HOURS.every(hour=>d.checked.includes(t.market+'|'+date+'|'+hour))));
- save(d);if(errors)$('progress').textContent='일부 조회 실패 '+errors+'건 · 재실행하면 재시도';
+const stamp=ms=>new Date(ms).toLocaleString('ko-KR',{timeZone:'Asia/Seoul',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+function settle(market,rows,cutoff){
+ for(const r of history.filter(r=>r.market===market&&!r.outcome&&!r.expired&&r.entryCutoff+30*60000<=cutoff)){
+  const result=S.outcome(rows,r.entryCutoff);
+  if(result)r.outcome=result;
+  else r.expired=true; // Missing history is never a loss or a success.
+ }
 }
-async function currentVector(market){const a=await get('/candles/minutes/15?market='+encodeURIComponent(market)+'&count=120');const limit=Math.floor(Date.now()/STEP)*STEP;return vector(order(a.filter(c=>epoch(c.candle_date_time_utc)<limit)))}
-let savedModel=null;
-async function loadArchive(){
- savedModel=null;archiveSamples=[];archiveMarkets=0;
+function remember(market,name,signal,cutoff){
+ if(!['watch','confirmed'].includes(signal.stage))return;
+ // Separate stages, one observation per coin/stage per 30 minutes.
+ if(history.some(r=>r.market===market&&r.stage===signal.stage&&Math.abs(cutoff-r.cutoff)<30*60000))return;
+ history.push({version:51,market,name,stage:signal.stage,cutoff,entryCutoff:Math.ceil(Date.now()/60000)*60000,observedAt:Date.now(),score:signal.f.score,referencePrice:signal.f.price});
+ // Preserve pending observations; bound storage using old resolved records first.
+ if(history.length>1000){const i=history.findIndex(r=>r.outcome||r.expired);if(i>=0)history.splice(i,1);}
+}
+function performance(){
+ const lines=['<strong>이 기기에서 기록한 신호 후 30분 결과</strong>'];
+ for(const [stage,label] of [['watch','조기 관심'],['confirmed','돌파 확인']]){
+  const records=history.filter(r=>r.stage===stage),done=records.filter(r=>r.outcome),hits=done.filter(r=>r.outcome.result==='target').length;
+  const losses=done.filter(r=>r.outcome.result==='stop').length,ambiguous=done.filter(r=>r.outcome.result==='ambiguous').length;
+  const expired=records.filter(r=>r.expired).length,pending=records.length-done.length-expired;
+  lines.push('<p>'+label+' · 평가 '+done.length+'건 · 목표 도달 '+hits+'건 · 손절선 먼저 '+losses+'건 · 순서 불명 '+ambiguous+'건 · 시간 종료 '+done.filter(r=>r.outcome.result==='timeout').length+'건'+(done.length?' · 관측 적중률 '+(100*hits/done.length).toFixed(1)+'%':'')+' · 대기 '+pending+'건 · 자료 누락 '+expired+'건</p>');
+ }
+ lines.push('<p>각 신호가 화면에 표시된 뒤 다음 1분봉 시가를 진입 기준으로, 30분 이내 비용 가정 0.3%를 뺀 +3% 목표 / -2% 손절선 도달 순서를 관찰합니다. 같은 봉에 둘 다 닿으면 순서 불명으로 세며 성공에 포함하지 않습니다. 실제 매매 수익률·상승 확률이 아닙니다.</p>');
+ if(!storageOK)lines.push('<p>기기 저장 실패: 기록이 유지되지 않을 수 있습니다.</p>');
+ $('forward').innerHTML=lines.join('');
+}
+function card(r){const f=r.signal.f;return '<article class="item"><h3>'+esc(r.name)+' <small>'+esc(r.market)+'</small></h3><p>신호 점수 '+f.score.toFixed(0)+'/100 · 성공 확률 아님</p><p>분석 기준가 '+f.price.toLocaleString('ko-KR',{maximumFractionDigits:8})+'원 · 최근 15분 '+f.rise.toFixed(2)+'%</p><p>선행 10분 거래대금 '+f.setupRatio.toFixed(2)+'배 → 최근 5분 '+f.triggerRatio.toFixed(2)+'배 · 증가 지속 '+f.persistence+'/10봉</p><p>'+esc(r.signal.reason)+'</p><small>닫힌 봉 기준 '+stamp(r.cutoff)+' · 확인 '+stamp(r.checkedAt)+'</small></article>';}
+function render(rows,counts,cutoff,errors){
+ const sections=[['watch','조기 관심 · 돌파 전'],['confirmed','돌파 확인 · 선행 흔적 동반']];
+ $('results').innerHTML='<p>동일 기준 시각 '+stamp(cutoff)+' · 각 단계 최대 5개. 규칙은 검증 전 연구 가설이며 점수는 확률이 아닙니다.</p>'+sections.map(([stage,label])=>{
+ const group=rows.filter(r=>r.signal.stage===stage).sort((a,b)=>b.signal.f.score-a.signal.f.score);
+ return '<h3>'+label+' · '+group.length+'종목</h3>'+(group.length?group.slice(0,5).map(card).join(''):'<p>조건을 충족한 종목이 없습니다.</p>');
+ }).join('')+'<p>진단: 정상 분석 '+counts.valid+' · 연속 봉 부족 '+counts.missing+' · 거래대금 부족 '+counts.illiquid+' · 이미 상승 '+counts.extended+' · 순서 조건 미달 '+counts.quiet+' · API 오류 '+errors+'종목</p>';
+}
+async function run(){
+ if(busy)return;busy=true;clearTimeout(timer);timer=null;
+ for(const id of ['start','refresh','reset'])$(id).disabled=true;
+ const cutoff=Math.floor(Date.now()/60000)*60000;
+ const counts={valid:0,missing:0,illiquid:0,extended:0,quiet:0};let errors=0;const signals=[];
+ $('status').textContent='전체 원화마켓 분석 중';$('results').innerHTML='<p>새 분석 진행 중 · 이전 후보는 표시하지 않습니다.</p>';
  try{
-  const response=await fetch('data/pattern-model.json?v='+Date.now(),{cache:'no-store'});
-  if(!response.ok){archiveStatus='서버 패턴 학습 파일 생성 대기';return}
-  const model=await response.json();if(!Array.isArray(model.patterns))throw Error('패턴 파일 형식 오류');
-  savedModel=model;archiveSamples=model.patterns;archiveMarkets=Number(model.marketCount)||0;
-  archiveStatus='서버 학습 '+archiveMarkets+'종목 · 성공 '+model.positives+'건 · 전체 표본 '+model.sampleCount+'건 · '+(model.completed?'전체 수집 완료':'과거 데이터 수집 진행 중');
- }catch(e){archiveStatus='서버 학습 파일 로딩 오류: '+e.message}
-}
-function patternEvidence(f,patterns){
- const near=y=>patterns.filter(p=>p.y===y&&p.count>0).map(p=>({p,d:dist(f,p.f)})).sort((a,b)=>a.d-b.d).slice(0,5);
- const pos=near(1),neg=near(0);
- if(!pos.length||!neg.length)return null;
- const density=xs=>xs.reduce((s,x)=>s+Math.exp(-x.d*x.d/2)*Math.sqrt(x.p.count),0)/xs.reduce((s,x)=>s+Math.sqrt(x.p.count),0);
- const pd=density(pos),nd=density(neg),relative=pd/(pd+nd);
- if(!Number.isFinite(relative))return null;
- return {relative,nearest:pos[0],negative:neg[0],margin:neg[0].d-pos[0].d};
-}
-function phase(t,f){
- const change=100*Number(t.signed_change_rate||0),h1=f[0],h3=f[1],h6=f[2],volume=Math.expm1(f[4]),range=f[6];
- // Observable states, not a prediction of future returns.
- if((change>=10||h3>=7||h1>=5)&&volume>=.7)return {key:'acceleration',label:'급등 가속',reason:'최근 상승폭과 거래대금 움직임'};
- if((h1>=1.2||h3>=2.5||change>=4)&&volume>=.55)return {key:'early',label:'상승 초기',reason:'단기 상승과 거래대금 움직임'};
- if(volume>=1.25&&(h1>-.8||h3>-.8)&&range>=1.5)return {key:'pre',label:'급등 전조 관찰',reason:'거래대금 증가와 가격 변동'};
- return null;
-}
-async function rank(){
- const v=savedModel?.validation||{valid:false},patterns=archiveSamples;
- $('validation').textContent=savedModel?'과거 수집 '+savedModel.completedMarkets+'종목 · 대표 패턴 '+patterns.length+'개 · 시간순 검증 '+(v.valid?'통과':'미통과')+' · 비교 가능 시간대 '+v.groups+'개':'패턴 파일 불러오기 실패';
- if(!savedModel?.completed||patterns.length<10){$('results').innerHTML='<p>저장된 패턴 파일이 아직 준비되지 않았습니다.</p>';return}
- const selected=tickers.filter(t=>Number.isFinite(t.signed_change_rate)&&Number(t.trade_price)>0).sort((a,b)=>b.acc_trade_price_24h-a.acc_trade_price_24h);
- const groups={pre:[],early:[],acceleration:[]},reasons={missing:0,quiet:0,weak:0},stats={errors:0,checked:0};
- for(let i=0;i<selected.length;i++){
-  const t=selected[i];$('progress').textContent='전체 원화마켓 '+(i+1)+'/'+selected.length+' · '+t.market;
-  try{
-   const f=await currentVector(t.market);
-   if(!preSpike(f)){reasons.missing++;continue}
-   stats.checked++;
-   const state=phase(t,f);
-   if(!state){reasons.quiet++;continue}
-   const p=patternEvidence(f,patterns);
-   if(!p){reasons.missing++;continue}
-   const row={t,f,p,state};
-   // Broad phase-based observation, with separate pattern evidence. No artificial probability threshold.
-   groups[state.key].push(row);
-   if(p.relative<.5||p.margin<=0)reasons.weak++;
-  }catch(e){stats.errors++}
-  finally{await sleep(180)}
+  const markets=(await get('/market/all?isDetails=false')).filter(m=>m.market.startsWith('KRW-'));
+  $('scanned').textContent=markets.length;
+  // No market-cap or top-60 preselection: every current KRW pair is requested.
+  for(let i=0;i<markets.length;i++){
+   const m=markets[i];$('progress').textContent='1분봉 순서 분석 '+(i+1)+'/'+markets.length+' · '+m.market;
+   try{
+    const bars=await get('/candles/minutes/1?market='+encodeURIComponent(m.market)+'&count=200&to='+encodeURIComponent(new Date(cutoff).toISOString()));
+    settle(m.market,bars,cutoff);
+    const signal=S.detect(bars,cutoff);
+    if(signal.stage==='missing'){counts.missing++;continue;}
+    counts.valid++;
+    if(['illiquid','extended','quiet'].includes(signal.stage))counts[signal.stage]++;
+    else{
+     const row={market:m.market,name:m.korean_name||m.market,signal,cutoff,checkedAt:Date.now()};
+     signals.push(row);
+     // An old snapshot cannot become a newly observed early signal.
+     if(Date.now()-cutoff<=3*60000)remember(row.market,row.name,signal,cutoff);
+    }
+   }catch(e){errors++;}finally{await sleep(180);}
+   $('compared').textContent=counts.valid;
+  }
+  const stale=Date.now()-cutoff>3*60000;
+  // Keep the observed candidates for inspection but label stale runs explicitly.
+  const displayedAt=Date.now();
+  for(const r of history.filter(r=>r.cutoff===cutoff&&!r.outcome&&!r.expired))r.entryCutoff=Math.ceil(displayedAt/60000)*60000;
+  render(signals,counts,cutoff,errors);save();performance();
+  $('samples').textContent=signals.filter(r=>r.signal.stage==='watch').length;
+  $('negatives').textContent=signals.filter(r=>r.signal.stage==='confirmed').length;
+  $('validation').textContent='v51 순서 탐지: 과거 15분봉 모델과 분리 · 새 규칙의 과거 적중률은 아직 검증하지 않았습니다.';
+  $('status').textContent=stale?'분석 지연 · 오래된 기준 시각':errors?'일부 조회 실패':'분석 완료';
+  $('progress').textContent='완료 '+stamp(Date.now())+' · 기준 '+stamp(cutoff)+' · '+markets.length+'종목 요청 / '+counts.valid+'종목 유효 / 오류 '+errors+'종목'+(stale?' · 기준 시각이 3분 이상 지나 신규 기록을 제한했습니다.':'')+' · 자동 갱신 '+($('auto').checked?'켜짐':'꺼짐');
+ }catch(e){$('status').textContent='분석 실패';$('progress').textContent='조회 오류: '+e.message;}
+ finally{
+  save();performance();busy=false;for(const id of ['start','refresh','reset'])$(id).disabled=false;
+  if($('auto').checked)timer=setTimeout(run,60000);
  }
- const all=[...groups.pre,...groups.early,...groups.acceleration];
- $('compared').textContent=stats.checked;
- const fmt=r=>'<article class="item"><span class="score">급등 패턴 상대 유사도 '+Math.round(r.p.relative*100)+'/100</span><h3>'+esc(r.t.name)+' <small>'+esc(r.t.market)+'</small></h3><p>현재가 '+Number(r.t.trade_price).toLocaleString('ko-KR',{maximumFractionDigits:8})+'원 · 전일 대비 '+(100*r.t.signed_change_rate).toFixed(2)+'%</p><p>1시간 '+r.f[0].toFixed(2)+'% · 3시간 '+r.f[1].toFixed(2)+'% · 거래대금 변화 '+Math.expm1(r.f[4]).toFixed(2)+'배</p><p>'+esc(r.state.reason)+' · 과거 급등 패턴 거리 '+r.p.nearest.d.toFixed(2)+' / 실패 패턴 거리 '+r.p.negative.d.toFixed(2)+'</p><p>가장 가까운 과거 급등 대표 패턴 '+r.p.nearest.p.count+'건 · 평균 최고 상승폭 '+r.p.nearest.p.gain.toFixed(1)+'% (현재 예상치 아님)</p></article>';
- const sections=[['pre','급등 전조 관찰'],['early','상승 초기'],['acceleration','급등 가속']];
- $('results').innerHTML='<p><strong>전체 원화마켓 3단계 관찰</strong> · 상승률과 거래대금으로 현재 움직임을 분류하고, 저장된 성공·실패 패턴과의 유사도를 함께 표시합니다. 상승 예측 정확도는 검증되지 않았으며 유사도는 확률이 아닙니다.</p>'+
- sections.map(([key,label])=>{
-  const list=groups[key].sort((a,b)=>b.p.relative-a.p.relative||b.p.margin-a.p.margin);
-  return '<h3>'+label+' · '+list.length+'종목</h3>'+(list.length?list.slice(0,5).map(fmt).join(''):'<p>현재 해당 구간에서 관찰된 코인이 없습니다.</p>');
- }).join('')+
- '<p>진단: 정상 지표 '+stats.checked+'종목 · 움직임 기준 미달 '+reasons.quiet+'종목 · 유효 봉 부족 '+reasons.missing+'종목 · API 오류 '+stats.errors+'종목 · 움직임은 있지만 패턴 근거 약함 '+reasons.weak+'종목.</p>';
- $('progress').textContent=archiveStatus+' · 전체 '+selected.length+'종목 조회 · 유효 '+stats.checked+'종목 · 관찰 '+all.length+'종목 · API 오류 '+stats.errors+'종목';
 }
-async function run(train){if(busy)return;busy=true;for(const x of ['start','refresh','reset'])$(x).disabled=true;try{await marketData();await loadArchive();const d=read();$('scanned').textContent=archiveMarkets;$('samples').textContent=savedModel?.positives||0;$('negatives').textContent=savedModel?.negatives||0;await rank()}catch(e){$('progress').textContent='오류: '+e.message}finally{busy=false;for(const x of ['start','refresh','reset'])$(x).disabled=false}}
-$('start').onclick=()=>run(true);$('refresh').onclick=()=>run(false);
-$('reset').onclick=()=>{if(!confirm('v43 24시간 학습 데이터만 삭제할까요? 기존 오전 데이터는 유지됩니다.'))return;localStorage.removeItem(KEY);stats(blank());$('validation').textContent='검증 대기';$('results').innerHTML='<p>학습 초기화 완료</p>'};
-const d=read();stats(d);$('validation').textContent='GitHub 수집 데이터 검증 대기';$('status').textContent='실행 대기';
+$('start').onclick=run;$('refresh').onclick=run;
+$('reset').onclick=()=>{if(!confirm('이 기기에 기록한 v51 신호 관찰 결과를 삭제할까요?'))return;history=[];save();performance();};
+$('auto').onchange=()=>{clearTimeout(timer);timer=null;if($('auto').checked&&!busy)run();};
+$('status').textContent='분석 대기';performance();
 })();
