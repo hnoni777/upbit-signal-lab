@@ -13,7 +13,7 @@ function render(rows,counts,cutoff,errors){
  return '<h3>'+label+' · '+group.length+'종목</h3>'+(group.length?group.slice(0,5).map(card).join(''):'<p>조건을 충족한 종목이 없습니다.</p>');
  }).join('')+'<p>진단: 정상 분석 '+counts.valid+' · 연속 봉 부족 '+counts.missing+' · 거래대금 부족 '+counts.illiquid+' · 이미 상승 '+counts.extended+' · 순서 조건 미달 '+counts.quiet+' · API 오류 '+errors+'종목</p>';
 }
-const SERVER_URL='https://raw.githubusercontent.com/hnoni777/upbit-signal-lab/server-data/data/server-state.json';
+const SERVER_URL='https://api.github.com/repos/hnoni777/upbit-signal-lab/contents/data/server-state.json?ref=server-data';
 let lastServer=null;
 function serverPerformance(state){
  const lines=['<strong>서버가 누적 기록한 신호 후 30분 결과</strong>'];
@@ -40,14 +40,16 @@ async function loadServer(){
  if(busy)return;busy=true;clearTimeout(timer);timer=null;
  try{
   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),15000);
-  let response;try{response=await fetch(SERVER_URL+'?t='+Math.floor(Date.now()/60000),{cache:'no-store',signal:controller.signal});}finally{clearTimeout(timeout);}
+  let response;try{response=await fetch(SERVER_URL+'&t='+Math.floor(Date.now()/60000),{cache:'no-store',signal:controller.signal});}finally{clearTimeout(timeout);}
   if(!response.ok)throw Error('결과 조회 '+response.status);
-  const state=await response.json();if(state.schema!==52||!state.totals||!Array.isArray(state.history))throw Error('서버 결과 형식 오류');
+  const payload=await response.json();
+  const state=payload.schema===52?payload:JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(payload.content.replace(/\s/g,'')),c=>c.charCodeAt(0))));
+  if(state.schema!==52||!state.totals||!Array.isArray(state.history))throw Error('서버 결과 형식 오류');
   lastServer=state;paintServer(state);
  }catch(e){
   if(lastServer)paintServer(lastServer);
   $('status').textContent='서버 결과 조회 실패';$('progress').textContent='서버 결과를 가져오지 못했습니다: '+e.message+' · 화면의 결과가 있다면 이전 자료입니다. 서버 마지막 완료 시각을 확인해 주세요.';
- }finally{busy=false;if($('auto').checked)timer=setTimeout(loadServer,60000);}
+ }finally{busy=false;if($('auto').checked)timer=setTimeout(loadServer,300000);}
 }
 $('start').onclick=loadServer;$('refresh').onclick=loadServer;
 $('auto').onchange=()=>{clearTimeout(timer);timer=null;if($('auto').checked&&!busy)loadServer();};

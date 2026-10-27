@@ -38,11 +38,11 @@ test('default app reads server results without starting a device-side market sca
  const elements=new Map(),el=id=>{if(!elements.has(id))elements.set(id,{textContent:'',innerHTML:'',checked:false});return elements.get(id);};
  const urls=[];
  class Clock extends Date{constructor(...args){super(...(args.length?args:[cutoff+20000]));}static now(){return cutoff+20000;}}
- const context={window:{SequenceSignal:S},document:{getElementById:el,addEventListener(){}},Date:Clock,AbortController,localStorage:{getItem:()=>null,setItem(){}},setTimeout:()=>1,clearTimeout(){},fetch:async url=>{urls.push(url);return {ok:true,json:async()=>state};}};
+ const context={window:{SequenceSignal:S},document:{getElementById:el,addEventListener(){}},Date:Clock,AbortController,localStorage:{getItem:()=>null,setItem(){}},setTimeout:()=>1,clearTimeout(){},atob,TextDecoder,fetch:async url=>{urls.push(url);return {ok:true,json:async()=>({encoding:'base64',content:Buffer.from(JSON.stringify(state)).toString('base64')})};}};
  vm.runInNewContext(fs.readFileSync('app.js','utf8'),context);
  await new Promise(setImmediate);
  await el('start').onclick();
- assert.ok(urls.every(url=>url.includes('/server-data/data/server-state.json')));
+ assert.ok(urls.every(url=>url.includes('/contents/data/server-state.json?ref=server-data')));
  assert.equal(el('scanned').textContent,6);assert.equal(el('samples').textContent,6);
  assert.match(el('status').textContent,/서버 감시/);assert.match(el('forward').innerHTML,/서버가 누적/);
  state.snapshot.completedAt=cutoff-20*MIN;await el('refresh').onclick();assert.match(el('status').textContent,/지연/);
