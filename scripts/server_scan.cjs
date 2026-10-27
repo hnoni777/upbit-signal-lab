@@ -126,6 +126,8 @@ async function main(){
  const state=await scan(readState(input),{get:makeGetter(),onProgress:p=>{if(p.finished%50===0||p.finished===p.total)console.log('Scanned',p.finished,'/',p.total);}});
  state.lastTrigger=process.env.GITHUB_EVENT_NAME||'manual';
  if(state.lastTrigger==='schedule')state.lastScheduledAt=state.completedAt;
+ if(process.env.RUN_CHAINED==='true')state.lastAutonomousAt=state.completedAt;
+ state.schedule={requestedMinutes:5,provider:'GitHub Actions continuation',exactTiming:false};
  fs.mkdirSync(require('node:path').dirname(output),{recursive:true});
  fs.writeFileSync(output+'.tmp',JSON.stringify(state));fs.renameSync(output+'.tmp',output);
  console.log(JSON.stringify({runCount:state.runCount,cutoff:state.snapshot.cutoff,counts:state.snapshot.counts,watch:state.snapshot.candidates.filter(r=>r.signal.stage==='watch').length,confirmed:state.snapshot.candidates.filter(r=>r.signal.stage==='confirmed').length}));

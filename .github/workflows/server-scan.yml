@@ -1,20 +1,26 @@
 name: Background market scanner
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
+    inputs:
+      chained:
+        description: Unattended continuation
+        required: false
+        default: 'false'
   push:
     branches: [main]
     paths:
       - scripts/server_scan.cjs
+      - scripts/continue_scan.cjs
       - sequence.js
       - detail.js
       - .github/workflows/server-scan.yml
+      - .github/server-control.json
 permissions:
   contents: write
+  actions: write
 concurrency:
   group: upbit-server-scan
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -24,15 +30,26 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Check scanner control
+        id: control
+        run: |
+          echo "enabled=$(node -p 'require("./.github/server-control.json").enabled')" >> "$GITHUB_OUTPUT"
+          echo "SCAN_STARTED_AT=$(node -p 'Date.now()')" >> "$GITHUB_ENV"
       - name: Verify detector and server transitions
+        if: steps.control.outputs.enabled == 'true'
         run: node --test tests/*.test.cjs
       - name: Load durable server state
+        if: steps.control.outputs.enabled == 'true'
         run: |
           git fetch origin server-data
           git show origin/server-data:data/server-state.json > data/server-state.json
       - name: Analyze all current KRW pairs
+        if: steps.control.outputs.enabled == 'true'
+        env:
+          RUN_CHAINED: ${{ github.event.inputs.chained }}
         run: node scripts/server_scan.cjs data/server-state.json data/server-state.json
       - name: Persist results without rebuilding the app
+        if: steps.control.outputs.enabled == 'true'
         run: |
           git worktree add --detach "$RUNNER_TEMP/server-publish" origin/server-data
           mkdir -p "$RUNNER_TEMP/server-publish/data"
@@ -41,5 +58,12 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add data/server-state.json
-          git commit -m 'server: update all-market snapshot and observations'
-          git push origin HEAD:server-data
+          if ! git diff --cached --quiet; then
+            git commit -m 'server: update all-market snapshot and observations'
+            git push origin HEAD:server-data
+          fi
+      - name: Continue background analysis
+        if: ${{ !cancelled() && steps.control.outputs.enabled == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/continue_scan.cjs
