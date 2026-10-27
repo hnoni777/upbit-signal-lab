@@ -38,7 +38,7 @@ test('default app reads server results without starting a device-side market sca
  const elements=new Map(),el=id=>{if(!elements.has(id))elements.set(id,{textContent:'',innerHTML:'',checked:false});return elements.get(id);};
  const urls=[];
  class Clock extends Date{constructor(...args){super(...(args.length?args:[cutoff+20000]));}static now(){return cutoff+20000;}}
- const context={window:{SequenceSignal:S},document:{getElementById:el,addEventListener(){}},Date:Clock,AbortController,localStorage:{getItem:()=>null,setItem(){}},setTimeout:()=>1,clearTimeout(){},setInterval(){},atob,TextDecoder,fetch:async url=>{urls.push(url);return {ok:true,json:async()=>({encoding:'base64',content:Buffer.from(JSON.stringify(state)).toString('base64')})};}};
+ const context={window:{SequenceSignal:S,CandidateRecommendations:require('../recommend.js')},document:{getElementById:el,addEventListener(){}},Date:Clock,AbortController,localStorage:{getItem:()=>null,setItem(){}},setTimeout:()=>1,clearTimeout(){},setInterval(){},atob,TextDecoder,fetch:async url=>{urls.push(url);return {ok:true,json:async()=>({encoding:'base64',content:Buffer.from(JSON.stringify(state)).toString('base64')})};}};
  vm.runInNewContext(fs.readFileSync('app.js','utf8'),context);
  await new Promise(setImmediate);
  await el('start').onclick();

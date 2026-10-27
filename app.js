@@ -3,7 +3,7 @@
 (()=>{
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let busy=false,timer=null;
+let busy=false,timer=null,lastLoadFailed=false;
 const stamp=ms=>new Date(ms).toLocaleString('ko-KR',{timeZone:'Asia/Seoul',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
 const labels={maintaining:'흐름 유지',pullback:'눌림 관찰',watch:'초기 흔적 관찰',weakening:'신호 약화'};
 const num=(v,n=2)=>Number.isFinite(v)?v.toLocaleString('ko-KR',{maximumFractionDigits:n}):'자료 없음';
@@ -41,17 +41,30 @@ function serverPerformance(state){
   const stats=(detailed?state.detailTotals:state.totals)[stage],pending=state.history.filter(r=>r.stage===stage&&(detailed?r.strategyVersion===54:!r.strategyVersion)&&!r.outcome&&!r.expired).length;
   lines.push('<p>'+label+' · 평가 '+stats.evaluated+'건 · 목표 도달 '+stats.target+'건 · 손절선 먼저 '+stats.stop+'건 · 순서 불명 '+stats.ambiguous+'건 · 시간 종료 '+stats.timeout+'건'+(stats.evaluated?' · 관측 적중률 '+(100*stats.target/stats.evaluated).toFixed(1)+'%':'')+' · 대기 '+pending+'건 · 자료 누락 '+stats.missing+'건</p>');
  }
+ lines.push('<p>이 집계는 전체 v54 신호의 결과이며, 위 TOP 3만의 적중률이 아닙니다. 우선 검토 선정 규칙의 수익성은 별도 검증 전입니다.</p>');
  lines.push('<p>서버 분석 완료 뒤 다음 1분봉 시가를 가상 진입으로 관찰합니다. 30분 이내 비용 가정 0.3%를 뺀 +3% 목표 / 가격 -2% 손절선 순서를 평가합니다. 실제 매매나 사용자가 화면을 연 시점의 수익률이 아닙니다. 순서 불명은 성공에서 제외합니다.</p>');
  $('forward').innerHTML=lines.join('');
 }
+function recommendations(state){
+ const result=window.CandidateRecommendations.select(state.snapshot,Date.now(),lastLoadFailed);
+ const intro='<p>단타용으로 먼저 살펴볼 후보를 최대 3개 고릅니다. 고정 조건을 비교한 결과이며, 매수 지시·성공 확률·검증된 수익률이 아닙니다.</p>';
+ if(!result.picks.length){
+  $('recommendations').innerHTML=intro+'<p><strong>지금은 추천 보류</strong> · '+esc(result.hold)+'</p>'+Object.entries(result.rejected).map(([reason,count])=>'<small>'+esc(reason)+' '+count+'종목</small>').join(' · ');return;
+ }
+ $('recommendations').innerHTML=intro+result.picks.map((r,i)=>{
+  const d=r.detail;
+  return '<article class="item recommendation"><span class="phase '+d.status+'">'+(i+1)+'순위 · '+labels[d.status]+'</span><h3>'+esc(r.name)+' <small>'+esc(r.market)+'</small></h3><p>왜 먼저 보는가</p><ul>'+r.recommendation.reasons.map(reason=>'<li>'+esc(reason)+'</li>').join('')+'</ul><p>최근 3분 '+num(d.returns[3])+'% · 15분 '+num(d.returns[15])+'% · BTC 대비 '+num(d.relativeBtc15)+'%p · 거래 '+num(d.recentRatio)+'배</p><p class="risk">'+r.recommendation.cautions.map(esc).join(' ')+'</p><p><strong>확인할 것:</strong> 실제 거래소의 현재 1분봉·호가에서 신호 이후 되밀리지 않았는지 확인하세요. 서버 자료와 현재 가격은 다를 수 있습니다.</p><small>상세 봉 기준 '+stamp(d.cutoff)+' · 서버 완료 '+stamp(state.snapshot.completedAt)+'</small></article>';
+ }).join('');
+}
 function paintServer(state){
  if(!state.snapshot){$('status').textContent='서버 첫 분석 대기';$('progress').textContent='서버가 첫 전체 시장 분석을 진행합니다. 화면을 닫아도 작업은 계속됩니다.';return;}
+ recommendations(state);
  const snapshot=state.snapshot,age=Date.now()-snapshot.completedAt,delayed=age>7*60000||snapshot.stale;
  render(snapshot.candidates,snapshot.counts,snapshot.cutoff,snapshot.counts.errors);
  $('scanned').textContent=snapshot.counts.requested;$('compared').textContent=snapshot.counts.valid;
  $('samples').textContent=snapshot.candidates.filter(r=>r.detail?.status!=='weakening').length;
  $('negatives').textContent=snapshot.candidates.filter(r=>r.detail?.status==='weakening').length;
- $('status').textContent=delayed?'서버 새 분석 지연':unchanged?'새 분석 결과 없음':snapshot.counts.errors?'서버 감시 · 일부 조회 실패':'새 서버 분석 반영';
+ $('status').textContent=lastLoadFailed?'서버 결과 조회 실패':delayed?'서버 새 분석 지연':unchanged?'새 분석 결과 없음':snapshot.counts.errors?'서버 감시 · 일부 조회 실패':'새 서버 분석 반영';
  $('progress').textContent='서버 분석 완료 '+stamp(snapshot.completedAt)+' · 봉 기준 '+stamp(snapshot.cutoff)+' · '+snapshot.counts.requested+'종목 요청 / '+snapshot.counts.valid+'종목 유효 / 오류 '+snapshot.counts.errors+'종목 · 상세 제외 '+(snapshot.excluded||0)+'종목 / 재조회 오류 '+(snapshot.refreshErrors||0)+'종목 · 서버 누적 '+state.runCount+'회 · '+(state.lastAutonomousAt?'자동 이어실행 확인됨':state.lastScheduledAt?'예약 실행 확인됨':'자동 이어실행 확인 전')+' · 약 5분 간격 이어실행(대기열 지연 가능)'+(delayed?' · 오래된 결과입니다. 현재 진입 신호로 보지 마세요.':'')+' · 서버 자료 나이 '+Math.max(0,Math.floor(age/60000))+'분 · 조회 시각 '+stamp(lastLookupAt||Date.now())+(unchanged?' · 직전 조회와 같은 서버 결과입니다.':'' );
  $('validation').textContent='휴대폰 화면과 관계없이 서버가 분석·기록합니다. 예약 실행은 정각을 보장하지 않으며 1·3·5·15분 흐름과 후보 재확인을 함께 봅니다. 예측 성능은 아직 검증되지 않았으며 이전 버전 기록과 v54 집계를 구분합니다.';
  serverPerformance(state);
@@ -81,8 +94,10 @@ async function loadServer(){
   if(lastServer?.completedAt>state.completedAt)state=lastServer;
   unchanged=lastSeenCompletedAt!==null&&lastSeenCompletedAt===state.completedAt;
   lastSeenCompletedAt=state.completedAt;lastLookupAt=Date.now();
-  lastServer=state;paintServer(state);
+  lastLoadFailed=false;lastServer=state;paintServer(state);
  }catch(e){
+  lastLoadFailed=true;
+  if(!lastServer)$('recommendations').innerHTML='<p>자료 조회 실패로 추천을 보류합니다.</p>';
   if(lastServer)paintServer(lastServer);
   $('status').textContent='서버 결과 조회 실패';$('progress').textContent='서버 결과를 가져오지 못했습니다: '+e.message+' · 화면의 결과가 있다면 이전 자료입니다. 서버 마지막 완료 시각을 확인해 주세요.';
  }finally{busy=false;if($('auto').checked)timer=setTimeout(loadServer,300000);}
