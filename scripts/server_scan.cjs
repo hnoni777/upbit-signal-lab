@@ -1,7 +1,7 @@
 'use strict';
 const fs=require('node:fs');
 const S=require('../sequence.js');
-const MINUTE=60000, API='https://upbit-signal-proxy.parkdam6.workers.dev/v1';
+const MINUTE=60000, API=process.env.UPBIT_API_BASE||'https://upbit-signal-proxy.parkdam6.workers.dev/v1';
 const emptyStats=()=>({evaluated:0,target:0,stop:0,ambiguous:0,timeout:0,missing:0,netTotal:0});
 function initial(){return {schema:52,runCount:0,history:[],totals:{watch:emptyStats(),confirmed:emptyStats()}};}
 function readState(path){

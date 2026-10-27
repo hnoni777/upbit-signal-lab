@@ -1,0 +1,25 @@
+name: Verify direct Upbit connection
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/direct-upbit-check.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  direct:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Load current state for a shadow scan
+        run: |
+          git fetch origin server-data
+          git show origin/server-data:data/server-state.json > /tmp/direct-input.json
+      - name: Test all KRW markets directly without publishing results
+        env:
+          UPBIT_API_BASE: https://api.upbit.com/v1
+        run: node scripts/server_scan.cjs /tmp/direct-input.json /tmp/direct-output.json
