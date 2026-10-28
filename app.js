@@ -1,5 +1,5 @@
 'use strict';
-/* v54: server results only; all quotation requests run on the server. */
+/* v57: server analysis plus public live quotations for TOP 3. */
 (()=>{
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -45,8 +45,21 @@ function serverPerformance(state){
  lines.push('<p>서버 분석 완료 뒤 다음 1분봉 시가를 가상 진입으로 관찰합니다. 30분 이내 비용 가정 0.3%를 뺀 +3% 목표 / 가격 -2% 손절선 순서를 평가합니다. 실제 매매나 사용자가 화면을 연 시점의 수익률이 아닙니다. 순서 불명은 성공에서 제외합니다.</p>');
  $('forward').innerHTML=lines.join('');
 }
+let quoteRows=[],quoteState={connected:false,data:{},available:false};
+const live=window.LiveQuotes?.create(state=>{quoteState=state;paintQuotes();});
+function paintQuotes(){
+ const panel=$('quotes');if(!panel)return;
+ const intro='<p>업비트 공개 시세 · 화면을 보고 있을 때 TOP 3만 수신합니다. 서버 분석은 별도로 약 5분마다 갱신됩니다. 호가 잔량은 취소될 수 있으며 세력 매집이나 실제 체결을 뜻하지 않습니다.</p>';
+ if(!quoteRows.length){panel.innerHTML=intro+'<p>추천 후보가 없어서 실시간 구독을 대기합니다.</p>';return;}
+ panel.innerHTML=intro+'<p role="status">'+(!quoteState.available?'이 환경에서 실시간 연결을 지원하지 않습니다.':quoteState.connected?'시세 연결됨 · 항목별 자료 시각 확인':'시세 연결 대기·끊김 · 재연결 중, 현재값 확인 불가')+'</p>'+quoteRows.map(r=>{
+  const q=quoteState.data[r.market]||{},t=q.ticker,b=q.book,tf=window.LiveQuotes.fresh(t,quoteState.connected),bf=window.LiveQuotes.fresh(b,quoteState.connected);
+  return '<article class="item"><h3>'+esc(r.name)+' <small>'+esc(r.market)+'</small></h3><p>분석 기준 '+num(r.detail.price,8)+'원 · '+stamp(r.detail.cutoff)+'</p><p><strong>마지막 체결가 '+(t?num(t.price,8)+'원':'수신 대기')+'</strong> · '+(tf?'최신':'현재가 확인 불가·오래된 값')+'</p>'+(t?'<small>체결 '+stamp(t.tradeTime)+' · 시세 '+stamp(t.time)+'</small><p>분석 기준 대비 '+num((t.price/r.detail.price-1)*100)+'%'+(!tf?' (오래된 체결 기준)':'')+'</p>':'')+'<p>호가 '+(bf?'최신':'확인 불가·대기 또는 오래됨')+(b?' · '+stamp(b.time):'')+'</p>'+(b?'<p>최우선 매수 '+num(b.bid,8)+'원 / 매도 '+num(b.ask,8)+'원 · 간격 '+num(b.spread,4)+'%</p><p>가까운 '+b.levels.length+'단계 대기금액: 매수 '+num(b.bidKrw,0)+'원 / 매도 '+num(b.askKrw,0)+'원</p><details><summary>호가 단계별 가격·잔량</summary><table style="width:100%;font-size:12px"><thead><tr><th>매수 가격 / 수량</th><th>매도 가격 / 수량</th></tr></thead><tbody>'+b.levels.map(u=>'<tr><td>'+num(u.bid_price,8)+' / '+num(u.bid_size,4)+'</td><td>'+num(u.ask_price,8)+' / '+num(u.ask_size,4)+'</td></tr>').join('')+'</tbody></table></details>':'')+'<p class="risk">'+(!tf||!bf?'최신 가격·호가를 모두 확인하기 전에는 이 표시로 진입 판단을 하지 마세요.':'실시간 시세가 들어와도 이전 분석의 유효성이나 체결 가격을 보장하지 않습니다.')+'</p></article>';
+ }).join('');
+}
+setInterval(()=>{if(!document.hidden)paintQuotes();},1000);
 function recommendations(state){
  const result=window.CandidateRecommendations.select(state.snapshot,Date.now(),lastLoadFailed,state.learning?.champion||null);
+ quoteRows=result.picks;live?.set(quoteRows.map(r=>r.market));paintQuotes();
  const intro='<p>정렬 기준: '+(state.learning?.champion?'시간순 비교 기준을 통과한 학습 모델':'기존 고정 규칙')+'</p><p>단타용으로 먼저 살펴볼 후보를 최대 3개 고릅니다. 고정 조건을 비교한 결과이며, 매수 지시·성공 확률·검증된 수익률이 아닙니다.</p>';
  if(!result.picks.length){
   $('recommendations').innerHTML=intro+'<p><strong>지금은 추천 보류</strong> · '+esc(result.hold)+'</p>'+Object.entries(result.rejected).map(([reason,count])=>'<small>'+esc(reason)+' '+count+'종목</small>').join(' · ');return;
@@ -111,7 +124,8 @@ async function loadServer(){
 setInterval(()=>{if(lastServer&&!document.hidden)paintServer(lastServer);},30000);
 $('start').onclick=loadServer;$('refresh').onclick=loadServer;
 $('auto').onchange=()=>{clearTimeout(timer);timer=null;if($('auto').checked&&!busy)loadServer();};
-document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!busy)loadServer();});
+document.addEventListener('visibilitychange',()=>{if(document.hidden)live?.stop();else{live?.resume();if(!busy)loadServer();}});
+window.addEventListener?.('pagehide',()=>live?.stop());
 $('status').textContent='서버 결과 확인 중';
 loadServer();
 })();
