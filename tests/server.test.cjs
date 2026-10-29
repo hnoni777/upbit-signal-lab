@@ -62,3 +62,13 @@ test('lost setup remains visible as follow-up without adding a fresh signal',asy
  assert.ok(second.snapshot.candidates.every(r=>r.followUp&&r.detail.status==='weakening'));
  assert.equal(second.history.length,6);
 });
+
+
+test('server settles a pending learning outcome and applies it in the same scan',async()=>{
+ const L=require('../learner.cjs'),learning=L.state(),entry=cutoff-31*MIN;
+ learning.observations.push({id:'first-training-record',market:'KRW-T0',observedAt:entry-MIN,entryCutoff:entry,eligible:true,x:Array(12).fill(1)});
+ const result=await scan(initial(),{get:getter(),now:()=>cutoff+10000,learning});
+ assert.ok(learning.observations[0].outcome);assert.ok(result.learning.champion);
+ assert.equal(result.learning.champion.trainingSamples,1);assert.equal(result.learning.status,'immediate_applied');
+ assert.equal(result.learning.champion.trainedAt,result.completedAt);
+});

@@ -27,7 +27,7 @@ async function scan(previous,{get,now=Date.now,onProgress=()=>{},learning=null})
  if(!markets.length)throw Error('No KRW markets; previous snapshot preserved');
  const counts={requested:markets.length,valid:0,missing:0,illiquid:0,extended:0,quiet:0,errors:0};
  const candidates=[],errorMarkets=[];let next=0,finished=0;
- // Same production detector as browser and historical replay; no retraining.
+ // Fixed detector shared with replay; ranking retrains after outcomes settle below.
  async function worker(){while(next<markets.length){
   const m=markets[next++];
   try{
@@ -148,3 +148,4 @@ async function main(){
 }
 module.exports={initial,scan,readState,recordOutcome};
 if(require.main===module)main().catch(e=>{console.error(e.message);process.exitCode=1;});
+

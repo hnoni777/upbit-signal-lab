@@ -1,5 +1,6 @@
 'use strict';
-// Learn only from prospectively stored inputs. Promotion uses untouched later days.
+// v58: immediately retrain ranking when completed prospective outcomes change.
+const {createHash}=require('node:crypto');
 const S=require('./sequence.js'),R=require('./recommend.js');
 const VERSION=1,DAY=86400000,MINUTE=60000;
 const features=R.features;
@@ -61,41 +62,42 @@ function evaluate(rows,model){
  return {count,groups:groupsUsed,hitRate:count?target/count:null,meanNet:count?net/count:null};
 }
 function update(learning,now=Date.now()){
- const today=Math.floor(now/DAY);
- const resolved=learning.observations.filter(r=>r.eligible&&r.outcome&&r.outcome.end<=now&&r.observedAt>=now-90*DAY).sort((a,b)=>a.observedAt-b.observedAt);
- const start=resolved[0]?.observedAt;
- learning.evidence={resolved:resolved.length,required:400,days:start?Math.floor((now-start)/DAY):0,requiredDays:28};
- if(learning.lastAttemptDay===today)return;learning.lastAttemptDay=today;
- if(learning.champion){
-  const forward=resolved.filter(r=>r.observedAt>learning.champion.trainedAt);
-  const current=evaluate(forward,learning.champion),fixed=evaluate(forward,null);
-  if(current.count>=60&&current.groups>=20&&new Set(forward.map(r=>Math.floor(r.observedAt/DAY))).size>=7&&current.meanNet<fixed.meanNet-.2){
-   learning.rollbacks??=[];learning.rollbacks.push({id:learning.champion.id,at:now,current,fixed});learning.champion=null;learning.status='rolled_back';return;
-  }
+ // Only frozen, eligible observations with completed, known outcomes enter training.
+ // Repeated TOP3 recommendation rows and unresolved/missing rows are not samples.
+ const resolved=learning.observations.filter(r=>r.eligible&&!r.missing&&r.outcome&&
+  Number.isFinite(r.observedAt)&&r.observedAt<=now&&r.observedAt>=now-90*DAY&&
+  Number.isFinite(r.outcome.end)&&r.outcome.end<=now&&r.outcome.end>r.observedAt&&
+  ['target','stop','timeout','ambiguous'].includes(r.outcome.result)&&
+  Array.isArray(r.x)&&r.x.length===12&&r.x.every(Number.isFinite)
+ ).sort((a,b)=>a.observedAt-b.observedAt||String(a.id).localeCompare(String(b.id)));
+ const positives=resolved.filter(r=>r.outcome.result==='target').length;
+ learning.mode='immediate';
+ learning.evidence={resolved:resolved.length,days:resolved.length?Math.floor((now-resolved[0].observedAt)/DAY):0,positives,negatives:resolved.length-positives,windowDays:90};
+ if(!resolved.length){learning.status=learning.champion?'immediate_waiting':'collecting';return;}
+ const inputSignature=createHash('sha256').update(JSON.stringify(resolved.map(r=>[r.id,r.observedAt,r.outcome.end,r.outcome.result,r.x]))).digest('hex');
+ // No daily throttle or minimum-day/count/holdout gates. Unchanged inputs keep the model.
+ if(learning.champion?.policy==='immediate-v58'&&learning.inputSignature===inputSignature){learning.status='immediate_applied';return;}
+ const model=train(resolved);
+ if(![...model.weights,...model.mean,...model.scale].every(Number.isFinite)||model.scale.some(v=>v<=0)){
+  learning.status='training_failed';return;
  }
- if(resolved.length<400||!start||now-start<28*DAY){learning.status='collecting';learning.evidence={resolved:resolved.length,required:400,days:start?Math.floor((now-start)/DAY):0,requiredDays:28};return;}
- const dates=[...new Set(resolved.map(r=>Math.floor(r.observedAt/DAY)))];
- const trainEnd=dates[Math.floor(dates.length*.6)]*DAY,validationEnd=dates[Math.floor(dates.length*.8)]*DAY;
- // A full outcome horizon is purged at each date boundary.
- const fit=resolved.filter(r=>r.outcome.end<trainEnd),validation=resolved.filter(r=>r.observedAt>=trainEnd&&r.outcome.end<validationEnd);
- const positives=fit.filter(r=>r.outcome.result==='target').length;
- if(fit.length<150||positives<20||fit.length-positives<20||validation.length<60){learning.status='insufficient_classes';return;}
- const challenger=train(fit),v=evaluate(validation,challenger),baseline=evaluate(validation,learning.champion);
- if(v.count<30||v.groups<10||v.meanNet<=baseline.meanNet+.1||v.hitRate<baseline.hitRate){learning.status='challenger_rejected';learning.lastEvaluation={validation:v,baseline};return;}
- // Never reuse a test record exposed by any prior model selection decision.
- const test=resolved.filter(r=>r.observedAt>=Math.max(validationEnd,learning.testWatermark||0));
- const score=evaluate(test,challenger),incumbent=evaluate(test,learning.champion);
- if(score.count<60||score.groups<20||new Set(test.map(r=>Math.floor(r.observedAt/DAY))).size<7){learning.status='fresh_holdout_needed';return;}
- learning.testWatermark=Math.max(...test.map(r=>r.outcome.end));
- learning.lastEvaluation={validation:v,baseline,test:score,incumbent,testFrom:Math.min(...test.map(r=>r.observedAt)),testTo:learning.testWatermark};
- if(score.meanNet<=0||score.meanNet<incumbent.meanNet+.15||score.hitRate<incumbent.hitRate){learning.status='holdout_rejected';return;}
- const id='adaptive-'+today;learning.champion={...challenger,id,trainedAt:now,trainedThrough:trainEnd,validationThrough:validationEnd,testThrough:learning.testWatermark};
- learning.promotions.push({id,at:now,test:score,incumbent});learning.status='promoted';
+ const id='immediate-'+inputSignature.slice(0,12);
+ learning.champion={...model,id,policy:'immediate-v58',validated:false,trainedAt:now,
+  trainedFrom:resolved[0].observedAt,trainedThrough:Math.max(...resolved.map(r=>r.outcome.end)),
+  trainingSamples:resolved.length,positives,negatives:resolved.length-positives};
+ learning.inputSignature=inputSignature;learning.lastUpdatedAt=now;
+ // Old held-out evaluation must never appear as validation of this immediate model.
+ learning.lastEvaluation=null;
+ learning.promotions??=[];
+ learning.promotions.push({id,at:now,mode:'immediate',validated:false,samples:resolved.length});
+ learning.promotions=learning.promotions.slice(-100);
+ learning.status='immediate_applied';
 }
-function summary(l){return {version:VERSION,status:l.status,observations:l.observations.length,resolved:l.stats.resolved,recommended:(l.recommendations||[]).length,recommendedEvaluated:(l.recommendations||[]).filter(r=>r.outcome).length,champion:l.champion,evidence:l.evidence||null,lastEvaluation:l.lastEvaluation||null,promotions:l.promotions.slice(-10),rollbacks:(l.rollbacks||[]).slice(-10),note:'조건을 통과한 후보 사이의 순위 학습입니다. 확률 보정과 실제 체결 수익 검증은 아닙니다.'};}
+function summary(l){return {version:VERSION,mode:l.mode||'immediate',status:l.status,observations:l.observations.length,resolved:l.stats.resolved,recommended:(l.recommendations||[]).length,recommendedEvaluated:(l.recommendations||[]).filter(r=>r.outcome).length,champion:l.champion,evidence:l.evidence||null,lastUpdatedAt:l.lastUpdatedAt||null,lastEvaluation:l.lastEvaluation||null,promotions:l.promotions.slice(-10),rollbacks:(l.rollbacks||[]).slice(-10),note:'평가 완료 기록이 늘면 즉시 재학습해 후보 순위에 적용합니다. 검증 전 모델이며 수익성 개선이 확인된 것은 아닙니다.'};}
 function prune(l){
  l.recommendations=(l.recommendations||[]).filter(r=>!r.outcome&&!r.missing).concat((l.recommendations||[]).filter(r=>r.outcome||r.missing).slice(-20000));
  const pending=l.observations.filter(r=>!r.outcome&&!r.missing),done=l.observations.filter(r=>r.outcome||r.missing);
  l.observations=[...pending,...done.filter(r=>r.eligible).slice(-50000),...done.filter(r=>!r.eligible).slice(-5000)].sort((a,b)=>a.observedAt-b.observedAt);
 }
 module.exports={prune,state,observe,settle,train,predict,evaluate,update,summary,features};
+

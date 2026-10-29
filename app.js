@@ -1,5 +1,5 @@
 'use strict';
-/* v57: server analysis plus public live quotations for TOP 3. */
+/* v58: immediate ranking updates from completed outcomes, plus public live quotes. */
 (()=>{
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -60,7 +60,7 @@ setInterval(()=>{if(!document.hidden)paintQuotes();},1000);
 function recommendations(state){
  const result=window.CandidateRecommendations.select(state.snapshot,Date.now(),lastLoadFailed,state.learning?.champion||null);
  quoteRows=result.picks;live?.set(quoteRows.map(r=>r.market));paintQuotes();
- const intro='<p>정렬 기준: '+(state.learning?.champion?'시간순 비교 기준을 통과한 학습 모델':'기존 고정 규칙')+'</p><p>단타용으로 먼저 살펴볼 후보를 최대 3개 고릅니다. 고정 조건을 비교한 결과이며, 매수 지시·성공 확률·검증된 수익률이 아닙니다.</p>';
+ const intro='<p>정렬 기준: '+(state.learning?.champion?(state.learning.champion.policy==='immediate-v58'?'즉시 학습 모델 적용 · 검증 전':'기존 학습 모델'):'기존 고정 규칙')+'</p><p>단타용으로 먼저 살펴볼 후보를 최대 3개 고릅니다. 고정 조건을 비교한 결과이며, 매수 지시·성공 확률·검증된 수익률이 아닙니다.</p>';
  if(!result.picks.length){
   $('recommendations').innerHTML=intro+'<p><strong>지금은 추천 보류</strong> · '+esc(result.hold)+'</p>'+Object.entries(result.rejected).map(([reason,count])=>'<small>'+esc(reason)+' '+count+'종목</small>').join(' · ');return;
  }
@@ -70,9 +70,12 @@ function recommendations(state){
  }).join('');
 }
 function learningPanel(state){
- const l=state.learning;if(!l){$('learning').innerHTML='<p>학습용 기록 수집을 준비하고 있습니다. 현재는 기존 고정 규칙으로 비교합니다.</p>';return;}
- const statuses={collecting:'학습 자료 수집 중',insufficient_classes:'성공·실패 표본 추가 필요',challenger_rejected:'새 모델의 비교 성과 미달 · 기존 방식 유지',fresh_holdout_needed:'새로운 미사용 검증 기간 대기',holdout_rejected:'새 모델의 이후 기간 성과 미달 · 기존 방식 유지',promoted:'시간순 비교 기준 통과 · 새 순위 모델 적용',rolled_back:'최근 성과 저하 · 고정 방식으로 복귀'};
- $('learning').innerHTML='<p><strong>'+esc(statuses[l.status]||l.status)+'</strong></p><p>현재 정렬: '+(l.champion?'시간순 비교를 통과한 학습 모델 '+esc(l.champion.id):'기존 고정 규칙')+'</p><p>보관 비교 표본 '+l.observations+'건 · 누적 결과 판정 '+l.resolved+'건 · 보관 중 추천 표본 '+l.recommended+'건 / 평가 완료 '+l.recommendedEvaluated+'건</p>'+(l.evidence?'<p>첫 학습 최소 기준: 자격 통과·평가 완료 '+l.evidence.resolved+'/'+l.evidence.required+'건 · 수집 '+l.evidence.days+'/'+l.evidence.requiredDays+'일. 이후 별도의 미사용 기간 비교도 통과해야 적용됩니다.</p>':'')+(l.lastEvaluation?.test?'<details><summary>최근 모델 교체 비교 결과</summary><p>새 모델 / 기존 방식 · 선정 '+l.lastEvaluation.test.count+'건 · 평균 가상 손익 '+num(l.lastEvaluation.test.meanNet)+'% / '+num(l.lastEvaluation.incumbent.meanNet)+'% · 목표 도달 '+num(100*l.lastEvaluation.test.hitRate)+'% / '+num(100*l.lastEvaluation.incumbent.hitRate)+'%</p><p>미사용 이후 기간의 연구용 비교이며, 실제 체결 손익이나 미래 수익 보장이 아닙니다.</p></details>':'')+'<p>성공·실패 당시 지표로 순위를 학습합니다. 하루 한 번 갱신을 시도하며, 같은 자료에서 잘 맞았다는 이유만으로 교체하지 않습니다. 설정한 비교 기준의 통과는 미래 수익이나 지속적인 개선을 보장하지 않습니다.</p>';
+ const l=state.learning;if(!l){$('learning').innerHTML='<p>학습 기록을 불러오는 중입니다.</p>';return;}
+ const immediate=l.mode==='immediate',m=l.champion;
+ const status=immediate?(l.status==='training_failed'?'학습 계산 실패 · 이전 모델 유지':m?'즉시 학습 모델 적용 중 · 검증 전':'평가 완료 기록 대기'):'이전 방식의 서버 결과 · 다음 서버 분석에서 즉시 학습으로 전환';
+ $('learning').innerHTML='<p><strong>'+esc(status)+'</strong></p><p>현재 정렬: '+(m?esc(m.id):'기존 고정 규칙')+'</p><p>보관 비교 표본 '+l.observations+'건 · 누적 결과 판정 '+l.resolved+'건 · 보관 중 추천 표본 '+l.recommended+'건 / 평가 완료 '+l.recommendedEvaluated+'건</p>'+
+ (m?.policy==='immediate-v58'?'<p>현재 모델 학습 표본 '+m.trainingSamples+'건 · 목표 도달 '+m.positives+'건 / 그 외 '+m.negatives+'건 · 마지막 적용 '+stamp(m.trainedAt)+'</p>':'')+
+ (immediate?'<p>28일·400건 대기 없이, 새 30분 평가 결과가 확정되는 서버 분석마다 재학습해 추천 순서에 바로 반영합니다. 새 결과가 없으면 현재 모델을 유지합니다. 후보 선정 조건과 목표·손절 기준은 유지합니다.</p><p class="risk">별도 검증을 기다리지 않고 적용한 모델입니다. 수익성 개선이나 성공 확률이 입증된 것은 아니며, 새 기록에 따라 순위가 바뀔 수 있습니다.</p>':'');
 }
 function paintServer(state){
  if(!state.snapshot){$('status').textContent='서버 첫 분석 대기';$('progress').textContent='서버가 첫 전체 시장 분석을 진행합니다. 화면을 닫아도 작업은 계속됩니다.';return;}
@@ -129,3 +132,4 @@ window.addEventListener?.('pagehide',()=>live?.stop());
 $('status').textContent='서버 결과 확인 중';
 loadServer();
 })();
+

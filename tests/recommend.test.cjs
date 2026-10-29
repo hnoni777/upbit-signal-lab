@@ -27,3 +27,12 @@ test('a qualified pullback explains that breakout resumption is unconfirmed',()=
  const result=R.select(snapshot([row('KRW-P','pullback')]),now);
  assert.equal(result.picks.length,1);assert.match(result.picks[0].recommendation.cautions[0],/아닙니다/);
 });
+
+
+test('learned model controls ranking immediately without relaxing candidate eligibility',()=>{
+ const rows=[row('KRW-A','maintaining',100),row('KRW-B','pullback',10),row('KRW-C','maintaining',99),row('KRW-D','maintaining',98),row('KRW-E','weakening')];
+ rows.forEach((r,i)=>{r.detail.returns[1]=i;r.detail.returns[5]=.3;});
+ const model={weights:[0,1,...Array(11).fill(0)],mean:Array(12).fill(0),scale:Array(12).fill(1)};
+ const picks=R.select(snapshot(rows),now,false,model).picks;
+ assert.deepEqual(picks.map(r=>r.market),['KRW-D','KRW-C','KRW-B']);
+});
