@@ -1,5 +1,8 @@
 name: Background market scanner
 on:
+  # Recover a broken dispatch chain independently of the previous runner.
+  schedule:
+    - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
     inputs:
       chained:
@@ -22,7 +25,7 @@ permissions:
   actions: write
 concurrency:
   group: upbit-server-scan
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.chained != 'true' }}
+  cancel-in-progress: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.chained != 'true') }}
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -35,7 +38,14 @@ jobs:
       - name: Check scanner control
         id: control
         run: |
-          echo "enabled=$(node -p 'require("./.github/server-control.json").enabled')" >> "$GITHUB_OUTPUT"
+          enabled=$(node -p 'require("./.github/server-control.json").enabled')
+          if [ "$enabled" = true ] && [ "$GITHUB_EVENT_NAME" = schedule ]; then
+            git fetch --depth=1 origin server-data
+            git show origin/server-data:data/server-state.json > "$RUNNER_TEMP/last-scan.json"
+            enabled=$(node -e 'const s=require(process.argv[1]); console.log(!Number.isFinite(s.completedAt)||Date.now()-s.completedAt>=600000)' "$RUNNER_TEMP/last-scan.json")
+            echo "Recovery scan needed: $enabled"
+          fi
+          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
           echo "SCAN_STARTED_AT=$(node -p 'Date.now()')" >> "$GITHUB_ENV"
       - name: Verify detector and server transitions
         if: steps.control.outputs.enabled == 'true'
@@ -66,10 +76,19 @@ jobs:
           git add data/server-state.json data/learning.json
           if ! git diff --cached --quiet; then
             git commit -m 'server: update all-market snapshot and observations'
-            git push origin HEAD:server-data
+            for attempt in 1 2 3; do
+              if git push origin HEAD:server-data; then break; fi
+              if [ "$attempt" = 3 ]; then exit 1; fi
+              sleep 5
+            done
           fi
       - name: Continue background analysis
         if: ${{ !cancelled() && steps.control.outputs.enabled == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node scripts/continue_scan.cjs
+        run: |
+          for attempt in 1 2 3; do
+            if node scripts/continue_scan.cjs; then exit 0; fi
+            if [ "$attempt" = 3 ]; then exit 1; fi
+            sleep 5
+          done
